@@ -57,7 +57,7 @@ function sameValue(a:any,b:any):boolean{
 export function auditChanges(before:any,after:any){
   const changes:any[]=[];
   function walk(a:any,b:any,path:string){
-    if(sameValue(a,b))return;
+    if(path!==''&&sameValue(a,b))return;
     if(Array.isArray(a)&&Array.isArray(b)&&[...a,...b].every(v=>v&&typeof v==='object'&&v.id)){
       const x=new Map(a.map(v=>[v.id,v])),y=new Map(b.map(v=>[v.id,v]));
       for(const id of new Set([...x.keys(),...y.keys()])){const old=x.get(id),cur=y.get(id),v=cur||old;const label=v.destination?`${v.destination} No.${v.list_no}`:v.name||v.item_code||v.factoryPo||v.onPo||v.text||id;walk(old,cur,path+' / '+label);}return;
