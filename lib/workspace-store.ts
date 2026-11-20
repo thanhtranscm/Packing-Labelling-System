@@ -39,10 +39,25 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
  return JSON.parse(text);
 }
 
+function sameValue(a:any,b:any):boolean{
+  if(Object.is(a,b))return true;
+  if(!a||!b||typeof a!=='object'||typeof b!=='object')return false;
+  if(Array.isArray(a)!==Array.isArray(b))return false;
+  if(Array.isArray(a)){
+    if(a.length!==b.length)return false;
+    for(let i=0;i<a.length;i++)if(!sameValue(a[i],b[i]))return false;
+    return true;
+  }
+  const ka=Object.keys(a),kb=Object.keys(b);
+  if(ka.length!==kb.length)return false;
+  for(const k of ka)if(!Object.prototype.hasOwnProperty.call(b,k)||!sameValue(a[k],b[k]))return false;
+  return true;
+}
+
 export function auditChanges(before:any,after:any){
   const changes:any[]=[];
   function walk(a:any,b:any,path:string){
-    if(JSON.stringify(a)===JSON.stringify(b))return;
+    if(sameValue(a,b))return;
     if(Array.isArray(a)&&Array.isArray(b)&&[...a,...b].every(v=>v&&typeof v==='object'&&v.id)){
       const x=new Map(a.map(v=>[v.id,v])),y=new Map(b.map(v=>[v.id,v]));
       for(const id of new Set([...x.keys(),...y.keys()])){const old=x.get(id),cur=y.get(id),v=cur||old;const label=v.destination?`${v.destination} No.${v.list_no}`:v.name||v.item_code||v.factoryPo||v.onPo||v.text||id;walk(old,cur,path+' / '+label);}return;
@@ -61,7 +76,7 @@ export async function commitWorkspace(database:any,company:string,revision:numbe
   const pointer=JSON.stringify({storageKey});
   let auditDetail=JSON.stringify(detail);
   // Keep large change records in R2; D1 rows have a 2 MB limit.
-  if(new TextEncoder().encode(auditDetail).byteLength>512_000){
+  if(auditDetail.length>400_000&&new TextEncoder().encode(auditDetail).byteLength>512_000){
     const auditKey=company+'/audit/'+crypto.randomUUID();
     await bucket().put(auditKey,auditDetail,{httpMetadata:{contentType:'application/json'}});
     const summary=auditSummary(detail,action,true).slice(0,120).map(row=>({label:row.label.slice(0,300),before:row.before.slice(0,1000),after:row.after.slice(0,1000)}));
