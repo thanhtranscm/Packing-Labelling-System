@@ -12,7 +12,7 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const managedLinux = readExecutionProfile() === "managed-linux";
 
 const localBindingConfig = {
-  name: "packing-labelling-system",
+  name: "pls",
   main: "./build/sites-worker.ts",
   compatibility_date: "2026-05-15",
   compatibility_flags: ["nodejs_compat"],
