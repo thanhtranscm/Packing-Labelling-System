@@ -1,0 +1,1 @@
+CREATE INDEX `idx_audit_company_id` ON `audit` (`company`,`id`);

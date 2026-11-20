@@ -1,0 +1,1 @@
+export function download(data:any,name:string,type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'){const blob=new Blob([data],{type});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000);}

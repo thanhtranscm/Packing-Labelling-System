@@ -1,0 +1,12 @@
+import fs from 'node:fs/promises';import ts from 'typescript';import assert from 'node:assert/strict';
+await fs.writeFile('.sites-runtime/image-zoom.mjs',ts.transpileModule(await fs.readFile('lib/image-zoom.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext}}).outputText);
+const {zoomLayout,anchoredZoomScroll}=await import('../.sites-runtime/image-zoom.mjs');
+const natural={w:1600,h:1000},box={w:1200,h:800},fit=zoomLayout(natural,box,1),large=zoomLayout(natural,box,3);
+assert.equal(fit.w,1200);assert.equal(fit.h,750);assert.equal(large.w,3600);assert.equal(large.h,2250);assert.equal(large.stageW,3600);
+const anchor={x:400,y:300},scroll=anchoredZoomScroll(fit,large,{x:0,y:0},anchor);
+assert.ok(Math.abs((scroll.x+anchor.x-large.left)/large.w-(anchor.x-fit.left)/fit.w)<1e-9);
+assert.ok(Math.abs((scroll.y+anchor.y-large.top)/large.h-(anchor.y-fit.top)/fit.h)<1e-9);
+const original=zoomLayout(natural,box,1/fit.fit);assert.equal(original.w,natural.w);assert.equal(original.h,natural.h);
+const reset=anchoredZoomScroll(large,fit,scroll,anchor);assert.equal(reset.x,0);assert.equal(reset.y,0);
+const portrait=zoomLayout({w:500,h:2000},box,1);assert.equal(portrait.h,800);assert.equal(portrait.w,200);assert.equal(portrait.left,500);
+console.log('PASS image zoom geometry: fit, actual enlargement, aspect ratio, cursor anchor, original pixels, reset and portrait fit. Browser interaction not exercised.');

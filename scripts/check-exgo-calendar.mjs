@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import ts from 'typescript';
+await fs.mkdir('.sites-runtime',{recursive:true});
+await fs.writeFile('.sites-runtime/check-month-order.mjs',ts.transpileModule(await fs.readFile('lib/month-order.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+const {compareExgoMonths,exgoLabel}=await import('../.sites-runtime/check-month-order.mjs');
+const base={year:2026,month:9};
+assert.deepEqual(['MID JAN','END JAN','MID FEB','END SEP','END OCT','END NOV','END DEC'].sort((a,b)=>compareExgoMonths(a,b,base)),['END SEP','END OCT','END NOV','END DEC','MID JAN','END JAN','MID FEB']);
+assert.equal(exgoLabel('MID JAN',base),'MID JAN 2027');
+assert.equal(exgoLabel('END SEP',base),'END SEP 2026');
+assert.equal(exgoLabel('MID JAN 2028',base),'MID JAN 2028');
+assert.equal(exgoLabel('MID JAN',{...base,overrides:{'MID JAN':2029}}),'MID JAN 2029');
+assert.equal(exgoLabel('END SEP',{year:2027,month:1}),'END SEP 2027');
+assert.equal(exgoLabel('—',base),'—');
+console.log('7 EXGO year/order checks passed');

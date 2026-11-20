@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import ts from 'typescript';
+await fs.mkdir('.sites-runtime',{recursive:true});
+await fs.writeFile('.sites-runtime/check-balance-separation.mjs',ts.transpileModule(await fs.readFile('lib/balance-separation.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+const {splitBalanceOrders}=await import('../.sites-runtime/check-balance-separation.mjs');
+const columns=[{name:'ORDER TYPE',column:5},{name:'WAREHOUSE',column:13},{name:'MOS',column:14}];
+const orders=[{id:'a',exgo:'MID MAY',reviewCells:{'5':' asp ','13':'NEW','14':'OTHER'}},{id:'b',exgo:'',reviewCells:{'5':'ON','13':'WSV','14':'ExW'}}];
+const r=splitBalanceOrders(orders,columns,{column:'order type',value:'ASP'});
+assert.deepEqual(r.separate.map(o=>o.id),['a']);assert.deepEqual(r.ordinary.map(o=>o.id),['b']);
+assert.equal(splitBalanceOrders(orders,columns,null).ordinary.length,2);
+assert.throws(()=>splitBalanceOrders(orders,columns,{column:'missing',value:'ASP'}));
+assert.throws(()=>splitBalanceOrders(orders,[...columns,{name:'Order Type',column:15}],{column:'ORDER TYPE',value:'ASP'}));
+assert.throws(()=>splitBalanceOrders([{...orders[0],reviewCellErrors:['5']}],columns,{column:'ORDER TYPE',value:'ASP'}));
+// Multiple columns or values use OR; one matching rule is sufficient.
+const multi=[{id:'asp',reviewCells:{'5':'ASP','13':'OTHER','14':'SEA'}},{id:'wsv',reviewCells:{'5':'ON','13':'WSV','14':'SEA'}},{id:'normal',reviewCells:{'5':'ON','13':'OTHER','14':'SEA'}}];
+const split=splitBalanceOrders(multi,columns,[{column:'ORDER TYPE',value:'ASP'},{column:'WAREHOUSE',value:'WSV'}]);
+assert.deepEqual(split.separate.map(o=>o.id),['asp','wsv']);assert.deepEqual(split.ordinary.map(o=>o.id),['normal']);
+assert.equal(splitBalanceOrders(multi,columns,[]).separate.length,0);
+assert.throws(()=>splitBalanceOrders(multi,columns,[{column:'ORDER TYPE',value:'ASP'},{column:'OTHER COLUMN',value:'X'}]));
+console.log('PASS exact review rule, case/whitespace, EXGO independence, missing/duplicate/error columns.');

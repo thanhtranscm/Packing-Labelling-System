@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import ts from 'typescript';
+const summarySource=(await fs.readFile('lib/order-rows.ts','utf8')).replace(/export /g,'');
+const source=(await fs.readFile('lib/po-state.ts','utf8')).replace("import {isSummaryOrder} from './order-rows';",summarySource);
+const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
+const {orderStatuses,orderStatus,pendingCount,controlOrders}=await import('data:text/javascript;base64,'+Buffer.from(js).toString('base64'));
+const orders=Array.from({length:20000},(_,i)=>({id:'p'+i,onPo:'ON-'+i,factoryPo:'F-'+i,qty:[6,12],total:18}));
+const month={orders:structuredClone(orders),versions:[],runs:[{id:'run',orders}],changes:orders.map(po=>({po,status:'Processed'})),imports:[{orders}],importRevision:1,generatedImportRevision:1};
+const start=performance.now();const statuses=orderStatuses(month),rows=controlOrders(month);assert.equal(pendingCount(month),0);
+assert.equal(statuses.size,20000);assert.equal(rows.length,20000);assert.deepEqual(rows.map(o=>o.id),orders.map(o=>o.id));
+for(const i of [0,1,5000,10000,19999])assert.equal(statuses.get(orders[i].id),orderStatus(month,orders[i]));
+month.orders[5000].total=24;month.orders[5000].qty=[12,12];assert.equal(pendingCount(month),1);assert.equal(orderStatuses(month).get('p5000'),'Not Run');
+month.importRevision=2;assert.equal(orderStatuses(month).get('p0'),'Unchanged');
+console.log('PASS 20,000 POs: statuses, pending count, source order, changed PO and reimport; local Node elapsed '+Math.round(performance.now()-start)+' ms (not a browser or hosted load benchmark).');
