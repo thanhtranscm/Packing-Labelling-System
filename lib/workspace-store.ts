@@ -1,12 +1,13 @@
 import {bucket} from './server';
 import {auditSummary} from './audit-summary';
+
 // Retry only reads of the same immutable snapshot, never a write or an older revision.
 export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<any>,timeoutMs?:number)=>Promise<any>=(_name,fn)=>fn()){
  const stored=JSON.parse(record.data);
  if(!stored.storageKey)return stored;
  let text='',snapshotSize=0;
  for(let attempt=0;attempt<2;attempt++){
-  let reader:ReadableStreamDefaultReader<Uint8Array>|undefined,abandoned=false;
+  let abandoned=false;
   try{
    text=await read('workspace snapshot '+(attempt+1),async()=>{
     const object=await bucket().get(stored.storageKey);
@@ -14,21 +15,15 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
     snapshotSize=object.size||snapshotSize;
     console.info('Workspace snapshot bytes:',object.size,'attempt:',attempt+1);
     if(abandoned){void object.body?.cancel().catch(()=>{});throw Error('Workspace read abandoned');}
-    // Own the reader so a timeout can cancel the stalled body before opening a fresh one.
-    if(!object.body)return object.text();
-    const bodyReader:ReadableStreamDefaultReader<Uint8Array>=object.body.getReader();reader=bodyReader;const decoder=new TextDecoder();let content='';
-    try{while(true){const chunk=await bodyReader.read();if(chunk.done)break;content+=decoder.decode(chunk.value,{stream:true});}return content+decoder.decode();}
-    finally{bodyReader.releaseLock();}
+    return object.text();
    },attempt===0?20000:30000);
    break;
   }catch(error){
-   abandoned=true;if(reader)void reader.cancel().catch(()=>{});
+   abandoned=true;
    const message=error instanceof Error?error.message:String(error);
    if(!/(timed out|temporar|network|connection|internal error|fetch failed)/i.test(message))throw error;
    if(attempt){
     if(!Number.isSafeInteger(snapshotSize)||snapshotSize<=0||snapshotSize>128*1024*1024)throw error;
-    // R2 may return object metadata but stall on a long response body. Recover
-    // from the same immutable key using verified ranges; never use old data.
     console.warn('Workspace snapshot: attempting range recovery');
     text=await read('workspace range recovery',async()=>{
      const chunkSize=1024*1024,count=Math.ceil(snapshotSize/chunkSize),parts:Uint8Array[]=new Array(count);let next=0;
@@ -43,6 +38,7 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
  }
  return JSON.parse(text);
 }
+
 export function auditChanges(before:any,after:any){
   const changes:any[]=[];
   function walk(a:any,b:any,path:string){

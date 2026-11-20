@@ -1,16 +1,36 @@
-import {applyPoMonthNotices,visiblePoMonthNotices} from '@/lib/po-month-notices';
+import {visiblePoMonthNotices,applyPoMonthNotices} from '@/lib/po-month-notices';
 import {readStage} from '@/lib/read-stage';
 import {validateImageMonthChanges} from '@/lib/image-application';
-import {syncStandard,syncStandardImages,reconcileStandardWorkspace} from '@/lib/material-state';
+import {syncStandard} from '@/lib/material-state';
 import {reconcileSummaryRows} from '@/lib/order-rows';
 import {workspaceData,auditChanges,commitWorkspace} from '@/lib/workspace-store';
 import {db,bucket,identity,fail} from '@/lib/server';
 import {prepareMonthSettings,validateSizeProfile} from '@/lib/size-settings';
-import {reconcileMaster} from '@/lib/master-update';
 import {validateWorkspaceShape,validateWorkspaceCompany} from '@/lib/workspace-validation';
 import {makeWorkspace} from '@/lib/bootstrap';
 import {validateStandardAdditions} from '@/lib/master-validation';
-export async function GET(req:Request){try{const user=await readStage('account/database',()=>identity());const company=new URL(req.url).searchParams.get('company');if(!['WSV','CTC'].includes(company||''))throw Error('Invalid workspace');let r:any=await readStage('workspace database',()=>db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first());if(!r){const data=makeWorkspace(company!);await db().prepare('INSERT OR IGNORE INTO workspaces(company,data,revision) VALUES(?,?,0)').bind(company,JSON.stringify(data)).run();r=await db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first();}const data=await workspaceData(r,readStage);if(user.role!=='user'){const before=structuredClone(data);const summaryFixed=reconcileSummaryRows(data);const masterFixed=reconcileMaster(data,company!);const standardFixed=reconcileStandardWorkspace(data);if(masterFixed||summaryFixed||standardFixed){const storageKey=company+'/workspace/'+crypto.randomUUID();await bucket().put(storageKey,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});const updated=await commitWorkspace(db(),company!,r.revision,storageKey,user.email,summaryFixed?'Removed imported Excel summary rows':standardFixed?'Reconciled Standard materials and image coverage':'Reconciled Master Data reference',auditChanges(before,data));if(updated){r.revision++;}else{r=await db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first();Object.assign(data,await workspaceData(r,readStage));}}}reconcileSummaryRows(data);reconcileStandardWorkspace(data);if(user.role==='user'){data.months=data.months.filter((m:any)=>m.show);data.poMonthNotices=visiblePoMonthNotices(data.poMonthNotices,data.months);}data.workspaceCompany=company;return Response.json({data,revision:r.revision,user});}catch(e){return fail(e);}}
+
+export async function GET(req:Request){
+ try{
+  const user=await readStage('account/database',()=>identity());
+  const company=new URL(req.url).searchParams.get('company');
+  if(!['WSV','CTC'].includes(company||''))throw Error('Invalid workspace');
+  let r:any=await readStage('workspace database',()=>db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first());
+  if(!r){
+   const data=makeWorkspace(company!);
+   await db().prepare('INSERT OR IGNORE INTO workspaces(company,data,revision) VALUES(?,?,0)').bind(company,JSON.stringify(data)).run();
+   r=await db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first();
+  }
+  const data=await workspaceData(r,readStage);
+  if(user.role==='user'){
+   data.months=(data.months||[]).filter((m:any)=>m.show);
+   data.poMonthNotices=visiblePoMonthNotices(data.poMonthNotices,data.months);
+  }
+  data.workspaceCompany=company;
+  return Response.json({data,revision:r.revision,user});
+ }catch(e){return fail(e);}
+}
+
 export async function PUT(req:Request){try{const user=await identity();if(user.role==='user')throw Error('Access denied');const {company,data,revision,action}=await req.json() as any;if(!['WSV','CTC'].includes(company))throw Error('Invalid workspace');validateWorkspaceCompany(data,company);reconcileSummaryRows(data);validateWorkspaceShape(data);if(!Number.isSafeInteger(revision)||revision<0)throw Error('Invalid revision');const old:any=await db().prepare('SELECT data FROM workspaces WHERE company = ? AND revision = ?').bind(company,revision).first();if(!old)return Response.json({error:'Workspace changed in another session. Reload before saving.'},{status:409});const before=await workspaceData(old);validateStandardAdditions(before.items,data.items);validateImageMonthChanges(before.items,data.items);data.workspaceCompany=company;data.items=syncStandard(before.items,data.items);for(const p of data.profiles)validateSizeProfile(p);data.months=data.months.map((m:any)=>{for(const p of m.profiles||data.profiles)validateSizeProfile(p);if(m.status==='Reroute'&&m.versions.length<2)throw Error('Reroute requires two Excel versions');return prepareMonthSettings(m,data);});for(const m of data.items){const vs=m.versions||[];if(new Set(vs.map((v:any)=>JSON.stringify([String(v.item_code||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' '),String(v.description||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ') ]))).size!==vs.length)throw Error('Duplicate item code and description version');if(vs.filter((v:any)=>v.all).length>1)throw Error('Only one default version per No.');const months=vs.flatMap((v:any)=>v.months);if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');for(const v of vs){const ims=(v.images||[]).flatMap((im:any)=>im.months);if(new Set(ims).size!==ims.length)throw Error('Conflicting image assignments');if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');}}
 const storageKey=company+'/workspace/'+crypto.randomUUID();await bucket().put(storageKey,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});const committed=await commitWorkspace(db(),company,revision,storageKey,user.email,action||'Updated workspace',auditChanges(before,data));if(!committed)return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});return Response.json({revision:revision+1,data});}catch(e){return fail(e);}}
 
