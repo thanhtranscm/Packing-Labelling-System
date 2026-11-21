@@ -13,7 +13,6 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
     const object=await bucket().get(stored.storageKey);
     if(!object)throw Error('Workspace data unavailable');
     snapshotSize=object.size||snapshotSize;
-    console.info('Workspace snapshot bytes:',object.size,'attempt:',attempt+1);
     if(abandoned){void object.body?.cancel().catch(()=>{});throw Error('Workspace read abandoned');}
     return object.text();
    },attempt===0?20000:30000);
@@ -24,7 +23,6 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
    if(!/(timed out|temporar|network|connection|internal error|fetch failed)/i.test(message))throw error;
    if(attempt){
     if(!Number.isSafeInteger(snapshotSize)||snapshotSize<=0||snapshotSize>128*1024*1024)throw error;
-    console.warn('Workspace snapshot: attempting range recovery');
     text=await read('workspace range recovery',async()=>{
      const chunkSize=1024*1024,count=Math.ceil(snapshotSize/chunkSize),parts:Uint8Array[]=new Array(count);let next=0;
      const worker=async()=>{while(next<count){const i=next++,offset=i*chunkSize,length=Math.min(chunkSize,snapshotSize-offset);const part=await bucket().get(stored.storageKey,{range:{offset,length}});if(!part)throw Error('Workspace range unavailable');const bytes=new Uint8Array(await part.arrayBuffer());if(bytes.length!==length)throw Error('Workspace range incomplete');parts[i]=bytes;}};
@@ -33,13 +31,12 @@ export async function workspaceData(record:any,read:(name:string,fn:()=>Promise<
     },30000);
     break;
    }
-   console.warn('Workspace snapshot retry:',message);
   }
  }
  return JSON.parse(text);
 }
 
-function sameValue(a:any,b:any):boolean{
+export function sameValue(a:any,b:any):boolean{
   if(Object.is(a,b))return true;
   if(!a||!b||typeof a!=='object'||typeof b!=='object')return false;
   if(Array.isArray(a)!==Array.isArray(b))return false;
@@ -56,19 +53,33 @@ function sameValue(a:any,b:any):boolean{
 
 export function auditChanges(before:any,after:any){
   const changes:any[]=[];
+  const describe=(v:any)=>v?.result&&v?.orders?{name:v.name,created:v.created,POs:v.orders.map((o:any)=>o.factoryPo||o.onPo),pairs:v.orders.reduce((n:number,o:any)=>n+(o.total||0),0),actor:v.actor}:v;
   function walk(a:any,b:any,path:string){
-    if(path!==''&&sameValue(a,b))return;
-    if(Array.isArray(a)&&Array.isArray(b)&&[...a,...b].every(v=>v&&typeof v==='object'&&v.id)){
-      const x=new Map(a.map(v=>[v.id,v])),y=new Map(b.map(v=>[v.id,v]));
-      for(const id of new Set([...x.keys(),...y.keys()])){const old=x.get(id),cur=y.get(id),v=cur||old;const label=v.destination?`${v.destination} No.${v.list_no}`:v.name||v.item_code||v.factoryPo||v.onPo||v.text||id;walk(old,cur,path+' / '+label);}return;
+    if(Object.is(a,b))return;
+    if(Array.isArray(a)&&Array.isArray(b)){
+      if(a.length===0&&b.length===0)return;
+      if([...a,...b].every(v=>v&&typeof v==='object'&&v.id)){
+        const x=new Map(a.map(v=>[v.id,v])),y=new Map(b.map(v=>[v.id,v]));
+        for(const id of new Set([...x.keys(),...y.keys()])){
+          const old=x.get(id),cur=y.get(id),v=cur||old;
+          const label=v.destination?`${v.destination} No.${v.list_no}`:v.name||v.item_code||v.factoryPo||v.onPo||v.text||id;
+          walk(old,cur,path+' / '+label);
+        }
+        return;
+      }
+      if(sameValue(a,b))return;
+      changes.push({path,before:describe(a),after:describe(b)});
+      return;
     }
     if(a&&b&&typeof a==='object'&&typeof b==='object'&&!Array.isArray(a)&&!Array.isArray(b)){
-      for(const key of new Set([...Object.keys(a),...Object.keys(b)]))walk(a[key],b[key],path?path+'.'+key:key);return;
+      const keys=new Set([...Object.keys(a),...Object.keys(b)]);
+      for(const key of keys)walk(a[key],b[key],path?path+'.'+key:key);
+      return;
     }
-    const describe=(v:any)=>v?.result&&v?.orders?{name:v.name,created:v.created,POs:v.orders.map((o:any)=>o.factoryPo||o.onPo),pairs:v.orders.reduce((n:number,o:any)=>n+(o.total||0),0),actor:v.actor}:v;
     changes.push({path,before:describe(a),after:describe(b)});
   }
-  walk(before,after,'');return {changes};
+  walk(before,after,'');
+  return {changes};
 }
 
 /** The optimistic write and its audit record commit in one D1 transaction. */

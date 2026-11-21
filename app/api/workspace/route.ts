@@ -3,7 +3,7 @@ import {readStage} from '@/lib/read-stage';
 import {validateImageMonthChanges} from '@/lib/image-application';
 import {syncStandard} from '@/lib/material-state';
 import {reconcileSummaryRows} from '@/lib/order-rows';
-import {workspaceData,auditChanges,commitWorkspace} from '@/lib/workspace-store';
+import {workspaceData,auditChanges,commitWorkspace,sameValue} from '@/lib/workspace-store';
 import {db,bucket,identity,fail} from '@/lib/server';
 import {prepareMonthSettings,validateSizeProfile} from '@/lib/size-settings';
 import {validateWorkspaceShape,validateWorkspaceCompany} from '@/lib/workspace-validation';
@@ -42,13 +42,28 @@ export async function PUT(req:Request){
   const old:any=await db().prepare('SELECT data FROM workspaces WHERE company = ? AND revision = ?').bind(company,revision).first();
   if(!old)return Response.json({error:'Workspace changed in another session. Reload before saving.'},{status:409});
   const before=await workspaceData(old);
-  const monthsOrProfilesChanged=JSON.stringify(before.months)!==JSON.stringify(data.months)||JSON.stringify(before.profiles)!==JSON.stringify(data.profiles);
+  const monthsOrProfilesChanged=!sameValue(before.months,data.months)||!sameValue(before.profiles,data.profiles);
   if(monthsOrProfilesChanged)reconcileSummaryRows(data);
   validateWorkspaceShape(data);
-  validateStandardAdditions(before.items,data.items);
-  validateImageMonthChanges(before.items,data.items);
+  const itemsChanged=!sameValue(before.items,data.items);
+  if(itemsChanged){
+   validateStandardAdditions(before.items,data.items);
+   validateImageMonthChanges(before.items,data.items);
+   data.items=syncStandard(before.items,data.items);
+   for(const m of data.items){
+    const vs=m.versions||[];
+    if(new Set(vs.map((v:any)=>JSON.stringify([String(v.item_code||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' '),String(v.description||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ') ]))).size!==vs.length)throw Error('Duplicate item code and description version');
+    if(vs.filter((v:any)=>v.all).length>1)throw Error('Only one default version per No.');
+    const months=vs.flatMap((v:any)=>v.months);
+    if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');
+    for(const v of vs){
+     const ims=(v.images||[]).flatMap((im:any)=>im.months);
+     if(new Set(ims).size!==ims.length)throw Error('Conflicting image assignments');
+     if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');
+    }
+   }
+  }
   data.workspaceCompany=company;
-  data.items=syncStandard(before.items,data.items);
   for(const p of data.profiles)validateSizeProfile(p);
   if(monthsOrProfilesChanged){
    data.months=data.months.map((m:any)=>{
@@ -57,23 +72,12 @@ export async function PUT(req:Request){
     return prepareMonthSettings(m,data);
    });
   }
-  for(const m of data.items){
-   const vs=m.versions||[];
-   if(new Set(vs.map((v:any)=>JSON.stringify([String(v.item_code||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' '),String(v.description||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ') ]))).size!==vs.length)throw Error('Duplicate item code and description version');
-   if(vs.filter((v:any)=>v.all).length>1)throw Error('Only one default version per No.');
-   const months=vs.flatMap((v:any)=>v.months);
-   if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');
-   for(const v of vs){
-    const ims=(v.images||[]).flatMap((im:any)=>im.months);
-    if(new Set(ims).size!==ims.length)throw Error('Conflicting image assignments');
-    if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');
-   }
-  }
   const storageKey=company+'/workspace/'+crypto.randomUUID();
-  await bucket().put(storageKey,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
+  const serializedData=JSON.stringify(data);
+  await bucket().put(storageKey,serializedData,{httpMetadata:{contentType:'application/json'}});
   const committed=await commitWorkspace(db(),company,revision,storageKey,user.email,action||'Updated workspace',auditChanges(before,data));
   if(!committed)return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
-  return Response.json({revision:revision+1,data});
+  return new Response(`{"revision":${revision+1},"data":${serializedData}}`,{headers:{'Content-Type':'application/json'}});
  }catch(e){return fail(e);}
 }
 
