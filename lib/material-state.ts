@@ -1,3 +1,5 @@
+import {resolveVersionImagesForPo} from './image-application';
+
 export const outputs=(m:any):string[]=>m.outputs||String(m.output_type||'disabled').split('_').filter((x:string)=>['label','special','card'].includes(x));
 export const reuseState=(image:any,rules:any[]):string=>{
   if(image.conditions){const selected=rules.filter(r=>image.conditions.includes(r.id||r.text));return selected.some(r=>r.blocks)?'Not reusable':selected.length?'Conditional reuse':'Reusable';}
@@ -18,7 +20,10 @@ export function syncStandardImages(items:any[]){
   const next=structuredClone(items);
   for(const m of next)if(m.destination!=='STANDARD')for(const v of m.versions||[]){
     const source=standardImageVersion(next,v);if(!source)continue;
-    v.images=structuredClone(source.images||[]).map((im:any)=>({...im,months:m.versions.length>1?(im.months||[]).filter((id:string)=>(v.months||[]).includes(id)):im.months||[]}));
+    v.images=structuredClone(source.images||[]).map((im:any)=>{
+      const months=m.versions.length>1?(im.months||[]).filter((id:string)=>(v.months||[]).includes(id)):im.months||[];
+      return {...im,months,poIds:months.length?(im.poIds||[]):[]};
+    });
   }
   return next;
 }
@@ -44,7 +49,7 @@ export function syncStandard(previous:any[],draft:any[]){
           const linked=after.versions.map((source:any)=>{
             const old=m.versions.find((v:any)=>v.standardVersionId===source.id)||m.versions.find((v:any)=>!v.standardVersionId&&sameMaterialVersion(v,source));
             const months=(source.months||[]).filter((id:string)=>!privateMonths.has(id));
-            return {...structuredClone(source),id:old?.id||crypto.randomUUID(),standardVersionId:source.id,months,all:privateVersions.some((v:any)=>v.all)?false:source.all,images:(source.images||[]).map((im:any)=>({...structuredClone(im),months:(im.months||[]).filter((id:string)=>months.includes(id))}))};
+            return {...structuredClone(source),id:old?.id||crypto.randomUUID(),standardVersionId:source.id,months,all:privateVersions.some((v:any)=>v.all)?false:source.all,images:(source.images||[]).map((im:any)=>{const kept=(im.months||[]).filter((id:string)=>months.includes(id));return {...structuredClone(im),months:kept,poIds:kept.length?(im.poIds||[]):[]};})};
           });
           m.versions=[...privateVersions,...linked];
         }else if(follows&&!after)m.versions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
@@ -97,23 +102,24 @@ export function reconcileStandardWorkspace(data:any){
   data.items=syncStandard(data.items,data.items);
   return migrate||before!==JSON.stringify(data.items);
 }
-export function hasMaterialImage(items:any[],country:string,no:number,code:string,monthId:string){
+export function hasMaterialImage(items:any[],country:string,no:number,code:string,monthId:string,poId?:string){
   const normalize=(s:any)=>String(s||'').trim().toUpperCase();
   const shared=standardImageVersion(items,{item_code:code});
-  if(shared)return (shared.images||[]).some((im:any)=>(im.months||[]).includes(monthId));
-  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&(v.images||[]).some((im:any)=>(im.months||[]).includes(monthId))));
+  if(shared)return resolveVersionImagesForPo(shared.images||[],monthId,poId).length>0;
+  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&resolveVersionImagesForPo(v.images||[],monthId,poId).length>0));
 }
 export function missingMaterialImages(versions:any[],items:any[],monthId:string,latestVersion:string){
   const rows=new Map<string,any>(),imageChecks=new Map<string,boolean>();
   for(const version of [...versions].sort((a,b)=>Number(a.id===latestVersion)-Number(b.id===latestVersion))){
     const result=version.result||{};
-    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country,no:row.item?.list_no,code:row.item?.item_code})));
+    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country,no:row.item?.list_no,code:row.item?.item_code,poId:row.po?.id})));
     for(const material of [...(result.missing||[]),...referenced]){
       if(!material.code||!material.country||material.no==null)continue;
       const key=String(material.country).trim().toUpperCase()+'|'+material.no+'|'+String(material.code).trim().toUpperCase();
-      if(!imageChecks.has(key))imageChecks.set(key,hasMaterialImage(items,material.country,material.no,material.code,monthId));
-      if(imageChecks.get(key))continue;
-      rows.set(key,{...material,newest:version.id===latestVersion});
+      const checkKey=key+'|'+(material.poId||'');
+      if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,material.country,material.no,material.code,monthId,material.poId));
+      if(imageChecks.get(checkKey))continue;
+      rows.set(key,{country:material.country,no:material.no,code:material.code,newest:version.id===latestVersion});
     }
   }
   return [...rows.values()];

@@ -18,7 +18,13 @@ export function validateWorkspaceShape(data:any){
   for(const version of item.versions){
    if(typeof version.item_code!=='string'||!Array.isArray(version.months)||!Array.isArray(version.images))throw Error('Invalid material version');
    version.months=version.months.filter((id:string)=>months.has(id));
-   for(const image of version.images){if(typeof image.id!=='string'||!Array.isArray(image.months))throw Error('Invalid image');if(image.note!==undefined&&(typeof image.note!=='string'||image.note.length>2000))throw Error('Image note must contain at most 2000 characters.');image.months=image.months.filter((id:string)=>months.has(id));}
+   for(const image of version.images){
+    if(typeof image.id!=='string'||!Array.isArray(image.months))throw Error('Invalid image');
+    if(image.note!==undefined&&(typeof image.note!=='string'||image.note.length>2000))throw Error('Image note must contain at most 2000 characters.');
+    if(image.poIds!==undefined&&(!Array.isArray(image.poIds)||image.poIds.some((id:any)=>typeof id!=='string')))throw Error('Invalid image PO selection');
+    image.months=image.months.filter((id:string)=>months.has(id));
+    if(!image.months.length&&Array.isArray(image.poIds))image.poIds=[];
+   }
   }
  }
 }

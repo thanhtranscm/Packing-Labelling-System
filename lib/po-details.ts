@@ -1,11 +1,29 @@
 import {norm} from './model';
 import {materialImageNote} from './material-state';
+import {resolveVersionImagesForPo} from './image-application';
 export const poSections=[['label','Label'],['special','Special Label'],['card','Card'],['pack','Outer - Empty - Inner'],['wrapping','Wrapping Paper'],['stuffing','Stuffing Paper']] as const;
 export const purchasePoFields=[['brand','BRAND'],['season','SEASON'],['createDate','CREATE DATE'],['price','PRICE'],['type','ORDER TYPE'],['category','PO CATEGORY'],['factoryPo','FACTORY PO'],['onPo','ON PO'],['sku','SKU'],['color','COLOR'],['country','COUNTRY'],['warehouse','WAREHOUSE'],['mos','MOS'],['model','MODEL'],['gender','GENDER']] as const;
 const baseHead=purchasePoFields.map(([,label])=>label);
 const base=(o:any)=>purchasePoFields.map(([field])=>o[field]??'');
-// Attach current references only to the exact material code and month. Published quantities stay intact.
-export function detailResult(result:any,orders:any[],month:any,ws:any){const ids=new Set(orders.map(o=>o.id));const next={...result,orders};for(const kind of ['label','special','card'])next[kind]=(result[kind]||[]).filter((r:any)=>ids.has(r.po.id)).map((r:any)=>{const current=ws.items.filter((m:any)=>norm(m.destination)===norm(r.item.destination||r.po.country));const liveImages=current.flatMap((m:any)=>(m.versions||[]).filter((v:any)=>norm(v.item_code)===norm(r.item.item_code)).flatMap((v:any)=>(v.images||[]).map((im:any)=>({...im,groupNote:materialImageNote(ws.items,m,v)}))));const matches=liveImages.filter((im:any)=>(im.months||[]).includes(month.id));const notes=new Map(liveImages.map((im:any)=>[im.id,im]));const historical=r.item.images||[];return {...r,item:{...r.item,images:historical.length?historical.map((im:any)=>notes.has(im.id)?{...im,note:(notes.get(im.id) as any).note||'',groupNote:(notes.get(im.id) as any).groupNote||''}:im):matches.map((im:any)=>({...im,referenceSource:'Current month reference'}))}};});next.pack=(result.pack||[]).filter((r:any)=>ids.has(r.po.id));next.paper=(result.paper||[]).filter((r:any)=>r.aggregate?orders.length===result.orders.length&&result.orders.every((o:any)=>ids.has(o.id)):ids.has(r.po.id));next.paperSizeTables=orders.length===result.orders.length&&result.orders.every((o:any)=>ids.has(o.id))?result.paperSizeTables:undefined;return next;}
+// Attach current references only to the exact material code, month, and PO (when PO-specific images exist). Published quantities stay intact.
+export function detailResult(result:any,orders:any[],month:any,ws:any){
+ const ids=new Set(orders.map(o=>o.id));
+ const next={...result,orders};
+ for(const kind of ['label','special','card'])next[kind]=(result[kind]||[]).filter((r:any)=>ids.has(r.po.id)).map((r:any)=>{
+  let current=ws.items.filter((m:any)=>norm(m.destination)===norm(r.item.destination||r.po.country));
+  if(!current.length)current=ws.items.filter((m:any)=>m.destination==='STANDARD');
+  const liveImages=current.flatMap((m:any)=>(m.versions||[]).filter((v:any)=>norm(v.item_code)===norm(r.item.item_code)).flatMap((v:any)=>(v.images||[]).map((im:any)=>({...im,groupNote:materialImageNote(ws.items,m,v)}))));
+  const matches=resolveVersionImagesForPo(liveImages,month.id,r.po.id);
+  const notes=new Map(liveImages.map((im:any)=>[im.id,im]));
+  const historical=r.item.images||[];
+  const resolved=matches.length?matches.map((im:any)=>({...im,referenceSource:'Current month reference'})):historical.map((im:any)=>notes.has(im.id)?{...im,note:(notes.get(im.id) as any).note||'',groupNote:(notes.get(im.id) as any).groupNote||''}:im);
+  return {...r,item:{...r.item,images:resolved}};
+ });
+ next.pack=(result.pack||[]).filter((r:any)=>ids.has(r.po.id));
+ next.paper=(result.paper||[]).filter((r:any)=>r.aggregate?orders.length===result.orders.length&&result.orders.every((o:any)=>ids.has(o.id)):ids.has(r.po.id));
+ next.paperSizeTables=orders.length===result.orders.length&&result.orders.every((o:any)=>ids.has(o.id))?result.paperSizeTables:undefined;
+ return next;
+}
 // Purchase snapshots only: same metadata, quantities and aggregate rounding as the buffer workbook.
 export function sectionTable(result:any,key:string,company:string){
  const sizes=result.sizes||[];let head:string[]=[];let rows:any[][]=[];let sumColumns:number[]=[];

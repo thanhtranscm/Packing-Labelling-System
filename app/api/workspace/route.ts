@@ -1,6 +1,6 @@
 import {visiblePoMonthNotices,applyPoMonthNotices} from '@/lib/po-month-notices';
 import {readStage} from '@/lib/read-stage';
-import {validateImageMonthChanges} from '@/lib/image-application';
+import {validateImageMonthChanges,validateVersionImages} from '@/lib/image-application';
 import {syncStandard} from '@/lib/material-state';
 import {reconcileSummaryRows} from '@/lib/order-rows';
 import {workspaceData,auditChanges,commitWorkspace,sameValue} from '@/lib/workspace-store';
@@ -57,8 +57,7 @@ export async function PUT(req:Request){
     const months=vs.flatMap((v:any)=>v.months);
     if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');
     for(const v of vs){
-     const ims=(v.images||[]).flatMap((im:any)=>im.months);
-     if(new Set(ims).size!==ims.length)throw Error('Conflicting image assignments');
+     validateVersionImages(v.images||[]);
      if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');
     }
    }
