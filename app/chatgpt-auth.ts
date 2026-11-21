@@ -15,6 +15,7 @@ const USER_FULL_NAME_ENCODING_HEADER =
 const PERCENT_ENCODED_UTF8 = "percent-encoded-utf-8";
 
 const CF_EMAIL_HEADER = "cf-access-authenticated-user-email";
+const CF_JWT_HEADER = "cf-access-jwt-assertion";
 const CF_USER_ID_HEADER = "cf-access-authenticated-user-id";
 
 const DEFAULT_USER: ChatGPTUser = {
@@ -30,6 +31,7 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
 
     const cfEmail =
       requestHeaders.get(CF_EMAIL_HEADER)?.trim().toLowerCase() ||
+      extractEmailFromJwt(requestHeaders.get(CF_JWT_HEADER)) ||
       extractEmailFromCfCookie(requestHeaders.get("cookie"));
 
     if (cfEmail) {
@@ -63,11 +65,16 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
         fullName,
       };
     }
+
+    const host = requestHeaders.get("host") || "";
+    if (host.startsWith("localhost") || host.startsWith("127.0.0.1")) {
+      return DEFAULT_USER;
+    }
   } catch {
-    // Fallback during build or local run
+    // Ignore header errors
   }
 
-  return DEFAULT_USER;
+  return null;
 }
 
 export async function requireChatGPTUser(
@@ -75,7 +82,10 @@ export async function requireChatGPTUser(
 ): Promise<ChatGPTUser> {
   void returnTo;
   const user = await getChatGPTUser();
-  return user ?? DEFAULT_USER;
+  if (!user) {
+    throw new Error("Sign in required");
+  }
+  return user;
 }
 
 export function chatGPTSignInPath(returnTo: string): string {
@@ -88,22 +98,33 @@ export function chatGPTSignOutPath(returnTo = "/"): string {
   return "/";
 }
 
-function extractEmailFromCfCookie(cookieHeader: string | null): string | null {
-  if (!cookieHeader) return null;
-  const match = cookieHeader.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
-  if (!match || !match[1]) return null;
+function extractEmailFromJwt(token: string | null): string | null {
+  if (!token) return null;
   try {
-    const parts = match[1].split(".");
+    const parts = token.trim().split(".");
     if (parts.length < 2) return null;
     const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-    const payload = JSON.parse(atob(padded)) as { email?: unknown };
+    const binary = atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const jsonText = new TextDecoder().decode(bytes);
+    const payload = JSON.parse(jsonText) as { email?: unknown };
     return typeof payload.email === "string"
       ? payload.email.trim().toLowerCase()
       : null;
   } catch {
     return null;
   }
+}
+
+function extractEmailFromCfCookie(cookieHeader: string | null): string | null {
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+  if (!match || !match[1]) return null;
+  return extractEmailFromJwt(match[1]);
 }
 
 function safeDecodeURIComponent(value: string): string | null {
