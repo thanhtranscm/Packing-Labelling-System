@@ -30,8 +30,10 @@ function validateItemsPayload(beforeItems:any[],rawItems:any[]){
 
 export async function GET(req:Request){
  try{
+  const url=new URL(req.url);
+  if(url.searchParams.get('ping')==='1')return Response.json({ok:true,ts:Date.now()});
   const user=await readStage('account/database',()=>identity());
-  const company=new URL(req.url).searchParams.get('company');
+  const company=url.searchParams.get('company');
   if(!['WSV','CTC'].includes(company||''))throw Error('Invalid workspace');
   let r:any=await readStage('workspace database',()=>db().prepare('SELECT * FROM workspaces WHERE company = ?').bind(company).first());
   if(!r){
