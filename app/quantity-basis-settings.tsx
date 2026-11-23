@@ -1,10 +1,10 @@
 'use client';
 import {useMemo,useState} from 'react';
 import {Checkbox} from '@/components/ui/checkbox';
-import {isCartonLabel,outputs} from '@/lib/material-state';
+import {countryMaterialTone,isCartonLabel,outputs} from '@/lib/material-state';
 import {CountryLabel} from './country-tone';
 
-export default function QuantityBasisSettings({items,admin,vi,onSave}:any){
+export default function QuantityBasisSettings({items,admin,vi,onSave,renderCountryPicker}:any){
  const [initialCartons]=useState<Set<string>>(()=>new Set(items.filter((m:any)=>isCartonLabel(m)).map((m:any)=>m.id)));
  const [initialSkuImages]=useState<Set<string>>(()=>new Set(items.filter((m:any)=>!!m.perSkuImage).map((m:any)=>m.id)));
  const [cartons,setCartons]=useState<Set<string>>(()=>new Set(initialCartons));
@@ -14,6 +14,17 @@ export default function QuantityBasisSettings({items,admin,vi,onSave}:any){
 
  const available=useMemo(()=>items.filter((m:any)=>outputs(m).length&&(m.item_code||(m.versions||[]).some((v:any)=>v.item_code))).sort((a:any,b:any)=>a.destination===b.destination?a.list_no-b.list_no:a.destination==='STANDARD'?-1:b.destination==='STANDARD'?1:a.destination.localeCompare(b.destination)),[items]);
  const countryList=useMemo(()=>[...new Set<string>(available.map((m:any)=>m.destination))],[available]);
+ const countryOptions=useMemo(()=>{
+  const hasStandard=countryList[0]==='STANDARD';
+  return [
+   {value:'ALL',label:(vi?'Tất cả quốc gia':'All countries')+` (${countryList.length})`,tone:'standard'},
+   ...countryList.map((c,i)=>({
+    value:c,
+    label:c==='STANDARD'?c:`${hasStandard?i:i+1}. ${c}`,
+    tone:countryMaterialTone(items,c)||'standard'
+   }))
+  ];
+ },[countryList,items,vi]);
  const cartonCount=available.filter((m:any)=>cartons.has(m.id)).length;
  const skuCount=available.filter((m:any)=>skuImages.has(m.id)).length;
 
@@ -65,10 +76,11 @@ export default function QuantityBasisSettings({items,admin,vi,onSave}:any){
   </div>
   <p className="basis-help">{vi?'Tích "Theo thùng" để tính SL theo số thùng carton (bỏ tích = tính theo đôi). Tích "Hình theo SKU" để yêu cầu mỗi SKU trong tháng có 1 hình riêng (bộ đếm Missing Image sẽ đếm số SKU còn thiếu).':'Check "Per carton" to calculate by carton count (unchecked = per pair). Check "Per-SKU image" to require one separate image per SKU in each month.'}</p>
   <div className="row wrap" style={{gap:'8px'}}>
-   <select aria-label={vi?'Lọc quốc gia':'Filter country'} value={countryFilter} onChange={e=>setCountryFilter(e.target.value)} style={{minWidth:'160px'}}>
-    <option value="ALL">{vi?'Tất cả quốc gia':'All countries'} ({countryList.length})</option>
-    {countryList.map(c=><option key={c} value={c}>{c}</option>)}
-   </select>
+   {renderCountryPicker
+    ?renderCountryPicker({value:countryFilter,onChange:setCountryFilter,options:countryOptions})
+    :<select aria-label={vi?'Lọc quốc gia':'Filter country'} value={countryFilter} onChange={e=>setCountryFilter(e.target.value)} style={{minWidth:'160px'}}>
+      {countryOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+     </select>}
    <input className="grow" type="search" aria-label={vi?'Tìm item':'Search items'} placeholder={vi?'Tìm Country, NO. hoặc Item Code...':'Search Country, NO. or Item Code...'} value={query} onChange={e=>setQuery(e.target.value)}/>
   </div>
   <div className="basis-item-list">
