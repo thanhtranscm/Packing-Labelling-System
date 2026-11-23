@@ -10,6 +10,24 @@ import {validateWorkspaceShape,validateWorkspaceCompany} from '@/lib/workspace-v
 import {makeWorkspace} from '@/lib/bootstrap';
 import {validateStandardAdditions} from '@/lib/master-validation';
 
+function validateItemsPayload(beforeItems:any[],rawItems:any[]){
+ validateStandardAdditions(beforeItems,rawItems);
+ validateImageMonthChanges(beforeItems,rawItems);
+ const nextItems=syncStandard(beforeItems,rawItems);
+ for(const m of nextItems){
+  const vs=m.versions||[];
+  if(new Set(vs.map((v:any)=>JSON.stringify([String(v.item_code||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' '),String(v.description||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ')]))).size!==vs.length)throw Error('Duplicate item code and description version');
+  if(vs.filter((v:any)=>v.all).length>1)throw Error('Only one default version per No.');
+  const months=vs.flatMap((v:any)=>v.months);
+  if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');
+  for(const v of vs){
+   validateVersionImages(v.images||[]);
+   if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');
+  }
+ }
+ return nextItems;
+}
+
 export async function GET(req:Request){
  try{
   const user=await readStage('account/database',()=>identity());
@@ -46,22 +64,7 @@ export async function PUT(req:Request){
   if(monthsOrProfilesChanged)reconcileSummaryRows(data);
   validateWorkspaceShape(data);
   const itemsChanged=!sameValue(before.items,data.items);
-  if(itemsChanged){
-   validateStandardAdditions(before.items,data.items);
-   validateImageMonthChanges(before.items,data.items);
-   data.items=syncStandard(before.items,data.items);
-   for(const m of data.items){
-    const vs=m.versions||[];
-    if(new Set(vs.map((v:any)=>JSON.stringify([String(v.item_code||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' '),String(v.description||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ') ]))).size!==vs.length)throw Error('Duplicate item code and description version');
-    if(vs.filter((v:any)=>v.all).length>1)throw Error('Only one default version per No.');
-    const months=vs.flatMap((v:any)=>v.months);
-    if(new Set(months).size!==months.length)throw Error('Conflicting version month assignments');
-    for(const v of vs){
-     validateVersionImages(v.images||[]);
-     if(vs.length>1&&(v.images||[]).some((im:any)=>im.months.some((id:string)=>!v.months.includes(id))))throw Error('Image month is outside version coverage');
-    }
-   }
-  }
+  if(itemsChanged)data.items=validateItemsPayload(before.items,data.items);
   data.workspaceCompany=company;
   for(const p of data.profiles)validateSizeProfile(p);
   if(monthsOrProfilesChanged){
@@ -80,11 +83,13 @@ export async function PUT(req:Request){
  }catch(e){return fail(e);}
 }
 
-// Narrow writes avoid uploading/downloading the complete workspace for a flag or import.
+// Narrow writes avoid uploading/downloading the complete workspace for targeted updates.
 export async function PATCH(req:Request){try{
  const user=await identity();if(user.role==='user')throw Error('Access denied');
  const input:any=await req.json(),{company,revision,monthId,operation}=input;
- if(!['WSV','CTC'].includes(company)||!Number.isSafeInteger(revision)||revision<0||(!['quantity-basis','po-month-notices'].includes(operation)&&typeof monthId!=='string')||!['visibility','import','quantity-basis','po-month-notices'].includes(operation))throw Error('Invalid month update');
+ const workspaceOps=['quantity-basis','po-month-notices','items','reuse'];
+ const monthOps=['visibility','import','month-update'];
+ if(!['WSV','CTC'].includes(company)||!Number.isSafeInteger(revision)||revision<0||(!workspaceOps.includes(operation)&&typeof monthId!=='string')||![...workspaceOps,...monthOps].includes(operation))throw Error('Invalid workspace update');
  const database=db(),storage=bucket(),record:any=await database.prepare('SELECT data FROM workspaces WHERE company = ? AND revision = ?').bind(company,revision).first();
  if(!record)return Response.json({error:'Workspace changed in another session. Reload before saving.'},{status:409});
  const data=await workspaceData(record);
@@ -108,18 +113,54 @@ export async function PATCH(req:Request){try{
   if(!await commitWorkspace(database,company,revision,key,user.email,'Updated material calculation basis',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return Response.json({revision:revision+1,basis:input.changes.map((c:any)=>({id:c.id,quantityBasis:c.quantityBasis}))});
  }
+ if(operation==='items'){
+  if(!Array.isArray(input.items))throw Error('Invalid items');
+  const beforeItems=data.items;
+  const nextItems=validateItemsPayload(beforeItems,input.items);
+  data.items=nextItems;
+  const detail=auditChanges({items:beforeItems},{items:nextItems});
+  const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
+  if(!await commitWorkspace(database,company,revision,key,user.email,input.action||'Country saved',detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
+  return Response.json({revision:revision+1,items:data.items});
+ }
+ if(operation==='reuse'){
+  if(!Array.isArray(input.changes)||!input.changes.length)throw Error('Invalid reuse update');
+  const beforeItems=structuredClone(data.items);
+  for(const change of input.changes){
+   const image=data.items.find((a:any)=>a.id===change.itemId)?.versions?.find((v:any)=>v.id===change.versionId)?.images?.find((im:any)=>im.id===change.imageId);
+   if(!image)throw Error('Image no longer exists');
+   image.conditions=Array.isArray(change.conditions)?change.conditions:[];
+   image.reuse=change.reuse;
+  }
+  data.items=syncStandard(beforeItems,data.items);
+  const detail=auditChanges({items:beforeItems},{items:data.items});
+  const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
+  if(!await commitWorkspace(database,company,revision,key,user.email,'Image reuse updated',detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
+  return Response.json({revision:revision+1,items:data.items});
+ }
  const index=data.months.findIndex((m:any)=>m.id===monthId);if(index<0)throw Error('Month unavailable');
  const previous=data.months[index];let detail:any,action:string,result:any;
  if(operation==='visibility'){
   if(typeof input.show!=='boolean')throw Error('Invalid visibility');
   if(previous.show===input.show)return Response.json({revision,show:input.show});
   data.months[index]={...previous,show:input.show};action='Month visibility changed';detail={changes:[{path:'months / '+previous.name+'.show',before:previous.show,after:input.show}]};result={show:input.show};
+ }else if(operation==='month-update'){
+  if(!input.changes||typeof input.changes!=='object')throw Error('Invalid month update');
+  let updated={...previous,...input.changes};
+  reconcileSummaryRows({months:[updated]});
+  for(const p of updated.profiles||data.profiles)validateSizeProfile(p);
+  if(updated.status==='Reroute'&&(updated.versions||[]).length<2)throw Error('Reroute requires two Excel versions');
+  if(input.prepareSettings)updated=prepareMonthSettings(updated,data);
+  data.months[index]=updated;
+  action=input.action||'Updated month';
+  detail=auditChanges({months:[previous]},{months:[updated]});
+  result={month:updated};
  }else{
   if(!Array.isArray(input.orders)||!input.orders.length||typeof input.file?.name!=='string'||typeof input.file?.id!=='string'||!input.file.id.startsWith(company+'/'))throw Error('Invalid PO import');
   if(!await storage.head(input.file.id))throw Error('Original import file unavailable');
   if(input.template){const t=input.template;if(t.company!==company||typeof t.id!=='string'||typeof t.signature!=='string'||!t.mapping)throw Error('Invalid import layout');data.importTemplates=[...(data.importTemplates||[]).filter((t:any)=>t.signature!==input.template.signature),input.template];}
   let month={...previous,orders:input.orders,controlCleared:false,importRevision:(previous.importRevision||0)+1};
-  reconcileSummaryRows({months:[month]});data.months[index]=month;validateWorkspaceShape({...data,items:structuredClone(data.items)});
+  reconcileSummaryRows({months:[month]});data.months[index]=month;
   for(const p of month.profiles||data.profiles)validateSizeProfile(p);
   month=prepareMonthSettings(month,data);
   const importRecord={created:new Date().toISOString(),name:input.file.name,fileId:input.file.id,...(input.template?{importTemplateId:input.template.id}:{})};
