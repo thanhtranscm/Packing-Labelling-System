@@ -1,7 +1,7 @@
-export function uploadImageMonths(item:any,version:any,monthId:string){
+export function uploadImageMonths(item:any,version:any,monthId:string,perSku=false){
   if(!monthId)throw Error('Select a month before uploading an image.');
   if(item.versions.length>1&&!(version.months||[]).includes(monthId))throw Error('Select this month for the version before uploading an image.');
-  if(item?.imageMode==='sku')return [];
+  if(perSku||item?.perSkuImage)return [];
   if((version.images||[]).some((im:any)=>(im.months||[]).includes(monthId)))return [];
   return [monthId];
 }
@@ -28,11 +28,12 @@ export function monthOrdersList(month:any):any[]{
   return list;
 }
 
-export function resolveVersionImagesForPo(images:any[],monthId:string,poId?:string):any[]{
+export function resolveVersionImagesForPo(images:any[],monthId:string,poId?:string,perSku=false):any[]{
   const monthImages=(images||[]).filter((im:any)=>(im.months||[]).includes(monthId));
-  if(!poId)return monthImages;
+  if(!poId)return perSku?[]:monthImages;
   const specific=monthImages.filter((im:any)=>Array.isArray(im.poIds)&&im.poIds.includes(poId));
   if(specific.length)return specific;
+  if(perSku)return [];
   return monthImages.filter((im:any)=>!im.poIds||im.poIds.length===0);
 }
 
@@ -85,8 +86,6 @@ export function appliedImageLabels(image:any,months:any[]):string{
   if(!poIds.length)return base;
   const month=months.find((m:any)=>m.id===image.months[0]);
   const orders=monthOrdersList(month);
-  const skus=[...new Set(poIds.map((id:string)=>{const o=orders.find((a:any)=>a.id===id);return o?.sku?String(o.sku).trim():'';}).filter(Boolean))];
-  if(skus.length===1)return `${base} · ${skus[0]} (${poIds.length} PO)`;
   const names=poIds.map((id:string)=>{const o=orders.find((a:any)=>a.id===id);return o?(o.factoryPo||o.onPo):'';}).filter(Boolean);
   if(names.length>0&&names.length<=2)return `${base} · ${names.join(', ')}`;
   return `${base} · ${poIds.length} PO`;

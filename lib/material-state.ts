@@ -39,7 +39,7 @@ export function syncStandard(previous:any[],draft:any[]){
         if(!after){next.splice(next.indexOf(m),1);continue;}
         const privateVersions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
         const linked=after.versions.map((v:any)=>({...structuredClone(v),id:(m.versions.find((old:any)=>old.standardVersionId===v.id)||m.versions.find((old:any)=>!old.standardVersionId&&sameMaterialVersion(old,v)))?.id||crypto.randomUUID(),standardVersionId:v.id}));
-        Object.assign(m,{standardId:after.id,description:after.description,item_code:after.item_code,qty_per_finish:after.qty_per_finish,unit:after.unit,output_type:after.output_type,outputs:outputs(after),...(after.imageMode?{imageMode:after.imageMode}:{}),versions:[...linked,...privateVersions]});
+        Object.assign(m,{standardId:after.id,description:after.description,item_code:after.item_code,qty_per_finish:after.qty_per_finish,unit:after.unit,output_type:after.output_type,outputs:outputs(after),perSkuImage:!!after.perSkuImage,versions:[...linked,...privateVersions]});
       }else{
         // A country can keep its own replacement and still subscribe to Standard versions.
         const follows=m.versions.some((v:any)=>v.standardVersionId||before.versions.some((s:any)=>sameMaterialVersion(s,v)));
@@ -103,81 +103,60 @@ export function reconcileStandardWorkspace(data:any){
   return migrate||before!==JSON.stringify(data.items);
 }
 
-export function isSkuImageItem(item:any){
-  return item?.imageMode==='sku';
-}
-
-export function isSkuImageMaterial(items:any[],country:string,no:number,code:string){
+export function isPerSkuImage(items:any[],country:string,no:number,code?:string):boolean{
   const normalize=(s:any)=>String(s||'').trim().toUpperCase();
-  const c=normalize(country),k=normalize(code);
-  const direct=items.find(m=>normalize(m.destination)===c&&m.list_no===no);
-  if(direct){
-    if(direct.imageMode==='sku')return true;
-    if(direct.imageMode==='single')return false;
+  if(code){
+    const shared=standardImageVersion(items,{item_code:code});
+    if(shared){
+      const stdParent=items.find(m=>m.destination==='STANDARD'&&(m.versions||[]).some((v:any)=>v.id===shared.id));
+      if(stdParent?.perSkuImage)return true;
+    }
   }
-  const shared=standardImageVersion(items,{item_code:code});
-  if(shared){
-    const stdParent=items.find(m=>m.destination==='STANDARD'&&(m.versions||[]).some((v:any)=>v.id===shared.id));
-    if(stdParent)return stdParent.imageMode==='sku';
+  const item=items.find(m=>normalize(m.destination)===normalize(country)&&m.list_no===no);
+  if(!item)return false;
+  if(item.perSkuImage)return true;
+  if(item.destination!=='STANDARD'&&(item.standardId||item.versions?.some((v:any)=>v.standardVersionId))){
+    const std=items.find(s=>s.destination==='STANDARD'&&s.list_no===no);
+    if(std?.perSkuImage)return true;
   }
-  const stdSameNo=items.find(m=>m.destination==='STANDARD'&&m.list_no===no&&normalize(m.item_code)===k);
-  return stdSameNo?.imageMode==='sku';
+  return false;
 }
 
 export function hasMaterialImage(items:any[],country:string,no:number,code:string,monthId:string,poId?:string){
   const normalize=(s:any)=>String(s||'').trim().toUpperCase();
+  const perSku=isPerSkuImage(items,country,no,code);
   const shared=standardImageVersion(items,{item_code:code});
-  if(shared)return resolveVersionImagesForPo(shared.images||[],monthId,poId).length>0;
-  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&resolveVersionImagesForPo(v.images||[],monthId,poId).length>0));
+  if(shared)return resolveVersionImagesForPo(shared.images||[],monthId,poId,perSku).length>0;
+  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&resolveVersionImagesForPo(v.images||[],monthId,poId,perSku).length>0));
 }
 
-export function missingMaterialImages(versions:any[],items:any[],monthId:string,latestVersion:string,monthOrders:any[]=[]){
+export function missingMaterialImages(versions:any[],items:any[],monthId:string,latestVersion:string,fallbackOrders:any[]=[]){
   const rows=new Map<string,any>(),imageChecks=new Map<string,boolean>();
   const poSkuMap=new Map<string,string>();
-  const registerPo=(o:any)=>{
-    if(o&&typeof o.id==='string'&&o.sku){
-      const s=String(o.sku).trim().toUpperCase();
-      if(s)poSkuMap.set(o.id,s);
+  for(const o of fallbackOrders||[]){
+    if(o&&typeof o.id==='string'&&o.sku)poSkuMap.set(o.id,String(o.sku).trim().toUpperCase());
+  }
+  for(const v of versions||[]){
+    for(const o of v.orders||[]){
+      if(o&&typeof o.id==='string'&&o.sku)poSkuMap.set(o.id,String(o.sku).trim().toUpperCase());
     }
-  };
-  for(const o of monthOrders||[])registerPo(o);
-  for(const version of versions||[]){
-    for(const o of version.orders||[])registerPo(o);
-    const result=version.result||{};
-    for(const section of ['label','special','card']){
-      for(const row of result[section]||[])registerPo(row.po);
-    }
-    for(const row of result.missing||[])registerPo(row.po);
   }
   for(const version of [...versions].sort((a,b)=>Number(a.id===latestVersion)-Number(b.id===latestVersion))){
     const result=version.result||{};
     const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country,no:row.item?.list_no,code:row.item?.item_code,poId:row.po?.id,sku:row.po?.sku})));
-    const allMaterials=[...(result.missing||[]).map((m:any)=>({...m,poId:m.poId||m.po?.id,sku:m.sku||m.po?.sku})),...referenced];
-    const groupedInVersion=new Map<string,{country:string;no:number;code:string;entries:any[]}>();
-    for(const material of allMaterials){
+    const missingRefs=(result.missing||[]).map((row:any)=>({country:row.country||row.item?.destination||row.po?.country,no:row.no??row.item?.list_no,code:row.code||row.item?.item_code,poId:row.poId||row.po?.id,sku:row.sku||row.po?.sku}));
+    for(const material of [...missingRefs,...referenced]){
       if(!material.code||!material.country||material.no==null)continue;
       const key=String(material.country).trim().toUpperCase()+'|'+material.no+'|'+String(material.code).trim().toUpperCase();
-      let g=groupedInVersion.get(key);
-      if(!g){g={country:material.country,no:material.no,code:material.code,entries:[]};groupedInVersion.set(key,g);}
-      g.entries.push(material);
-    }
-    for(const [key,g] of groupedInVersion){
-      const perSku=isSkuImageMaterial(items,g.country,g.no,g.code);
-      const missingSkus=new Set<string>();
-      let hasMissing=false;
-      for(const entry of g.entries){
-        const checkKey=key+'|'+(entry.poId||'');
-        if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,g.country,g.no,g.code,monthId,entry.poId));
-        if(imageChecks.get(checkKey))continue;
-        hasMissing=true;
-        if(perSku){
-          const skuVal=String(entry.sku||(entry.poId&&poSkuMap.get(entry.poId))||entry.poId||'UNKNOWN').trim().toUpperCase();
-          missingSkus.add(skuVal);
-        }
-      }
-      if(hasMissing){
-        rows.set(key,{country:g.country,no:g.no,code:g.code,newest:version.id===latestVersion,perSku,missingSkus:[...missingSkus].sort()});
-      }
+      const checkKey=key+'|'+(material.poId||'');
+      if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,material.country,material.no,material.code,monthId,material.poId));
+      if(imageChecks.get(checkKey))continue;
+      const perSku=isPerSkuImage(items,material.country,material.no,material.code);
+      const sku=String(material.sku||(material.poId?poSkuMap.get(material.poId):'')||material.poId||'DEFAULT').trim().toUpperCase();
+      const existing=rows.get(key);
+      const skus=existing?new Set<string>(existing.missingSkus):new Set<string>();
+      skus.add(sku);
+      rows.set(key,{country:material.country,no:material.no,code:material.code,newest:version.id===latestVersion||(existing?.newest||false),perSku,missingSkus:[...skus],missingCount:skus.size});
     }
   }
   return [...rows.values()];
