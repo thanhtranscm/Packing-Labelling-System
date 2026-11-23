@@ -11,6 +11,7 @@ export function validateWorkspaceShape(data:any){
  for(const item of data.items){
   if(item.imageNote!==undefined&&(typeof item.imageNote!=='string'||item.imageNote.length>2000))throw Error('Common image note must contain at most 2000 characters.');
   if(item.quantityBasis!==undefined&&!['pair','carton'].includes(item.quantityBasis))throw Error(`${item.destination} No.${item.list_no}: invalid calculation basis.`);
+  if(item.perSkuImage!==undefined&&typeof item.perSkuImage!=='boolean')throw Error(`${item.destination} No.${item.list_no}: invalid SKU image setting.`);
   if(item.imageMode!==undefined&&!['single','sku'].includes(item.imageMode))throw Error(`${item.destination} No.${item.list_no}: invalid image mode.`);
   if(!Number.isSafeInteger(item.list_no)||item.list_no<1||typeof item.destination!=='string'||!item.destination.trim()||!Array.isArray(item.versions))throw Error('Invalid country / No.');
   if(String(item.qty_per_finish??'').trim()===''||!Number.isFinite(Number(item.qty_per_finish))||Number(item.qty_per_finish)<0)throw Error(`${item.destination} No.${item.list_no}: quantity per pair must be zero or positive.`);

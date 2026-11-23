@@ -39,7 +39,8 @@ export function syncStandard(previous:any[],draft:any[]){
         if(!after){next.splice(next.indexOf(m),1);continue;}
         const privateVersions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
         const linked=after.versions.map((v:any)=>({...structuredClone(v),id:(m.versions.find((old:any)=>old.standardVersionId===v.id)||m.versions.find((old:any)=>!old.standardVersionId&&sameMaterialVersion(old,v)))?.id||crypto.randomUUID(),standardVersionId:v.id}));
-        Object.assign(m,{standardId:after.id,description:after.description,item_code:after.item_code,qty_per_finish:after.qty_per_finish,unit:after.unit,output_type:after.output_type,outputs:outputs(after),perSkuImage:!!after.perSkuImage,versions:[...linked,...privateVersions]});
+        const perSku=!!after.perSkuImage||after.imageMode==='sku';
+        Object.assign(m,{standardId:after.id,description:after.description,item_code:after.item_code,qty_per_finish:after.qty_per_finish,unit:after.unit,output_type:after.output_type,outputs:outputs(after),perSkuImage:perSku,imageMode:perSku?'sku':'single',versions:[...linked,...privateVersions]});
       }else{
         // A country can keep its own replacement and still subscribe to Standard versions.
         const follows=m.versions.some((v:any)=>v.standardVersionId||before.versions.some((s:any)=>sameMaterialVersion(s,v)));
@@ -57,7 +58,8 @@ export function syncStandard(previous:any[],draft:any[]){
     }
     for(const s of std.filter((m:any)=>!oldStd.some(old=>old.list_no===m.list_no&&old.item_code))){
       const existing=next.find((m:any)=>m.destination===country&&m.list_no===s.list_no);if(existing)continue;
-      next.push({...structuredClone(s),id:crypto.randomUUID(),destination:country,standardId:s.id,versions:s.versions.map((v:any)=>({...structuredClone(v),id:crypto.randomUUID(),standardVersionId:v.id}))});
+      const perSku=!!s.perSkuImage||s.imageMode==='sku';
+      next.push({...structuredClone(s),id:crypto.randomUUID(),destination:country,standardId:s.id,perSkuImage:perSku,imageMode:perSku?'sku':'single',versions:s.versions.map((v:any)=>({...structuredClone(v),id:crypto.randomUUID(),standardVersionId:v.id}))});
     }
   }
   return syncStandardImages(next);
@@ -109,15 +111,15 @@ export function isPerSkuImage(items:any[],country:string,no:number,code?:string)
     const shared=standardImageVersion(items,{item_code:code});
     if(shared){
       const stdParent=items.find(m=>m.destination==='STANDARD'&&(m.versions||[]).some((v:any)=>v.id===shared.id));
-      if(stdParent?.perSkuImage)return true;
+      if(stdParent?.perSkuImage||stdParent?.imageMode==='sku')return true;
     }
   }
   const item=items.find(m=>normalize(m.destination)===normalize(country)&&m.list_no===no);
   if(!item)return false;
-  if(item.perSkuImage)return true;
+  if(item.perSkuImage||item.imageMode==='sku')return true;
   if(item.destination!=='STANDARD'&&(item.standardId||item.versions?.some((v:any)=>v.standardVersionId))){
     const std=items.find(s=>s.destination==='STANDARD'&&s.list_no===no);
-    if(std?.perSkuImage)return true;
+    if(std?.perSkuImage||std?.imageMode==='sku')return true;
   }
   return false;
 }
