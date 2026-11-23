@@ -137,7 +137,7 @@ export function missingMaterialImages(versions:any[],items:any[],monthId:string,
   const poSkuMap=new Map<string,string>();
   const skuPoIdsMap=new Map<string,Set<string>>();
   const registerOrder=(o:any)=>{
-    if(!o||typeof o.id!=='string')return;
+    if(!o||typeof o.id!=='string'||o.previousOnly)return;
     const sku=String(o.sku||'').trim().toUpperCase();
     if(!sku)return;
     poSkuMap.set(o.id,sku);
@@ -147,14 +147,49 @@ export function missingMaterialImages(versions:any[],items:any[],monthId:string,
   };
   for(const o of fallbackOrders||[])registerOrder(o);
   for(const v of versions||[])for(const o of v.orders||[])registerOrder(o);
+
   for(const version of [...versions].sort((a,b)=>Number(a.id===latestVersion)-Number(b.id===latestVersion))){
     const result=version.result||{};
-    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country||row.country,no:row.item?.list_no??row.no,code:row.item?.item_code||row.code,poId:row.po?.id||row.poId,sku:row.po?.sku||row.sku})));
-    const missingRefs=(result.missing||[]).map((row:any)=>({country:row.country||row.item?.destination||row.po?.country,no:row.no??row.item?.list_no,code:row.code||row.item?.item_code,poId:row.poId||row.po?.id,sku:row.sku||row.po?.sku}));
+    const versionOrders=(version.orders&&version.orders.length?version.orders:fallbackOrders).filter((o:any)=>o&&!o.previousOnly&&!/cancel/i.test(o.status||''));
+    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({
+      country:row.po?.country||row.country||row.item?.destination,
+      no:row.item?.list_no??row.no,
+      code:row.item?.item_code||row.code,
+      poId:row.po?.id||row.poId,
+      sku:row.po?.sku||row.sku
+    })));
+    const missingRefs=(result.missing||[]).map((row:any)=>({
+      country:row.po?.country||row.country||row.item?.destination,
+      no:row.no??row.item?.list_no,
+      code:row.code||row.item?.item_code,
+      poId:row.poId||row.po?.id,
+      sku:row.sku||row.po?.sku
+    }));
+
+    const expanded:any[]=[];
     for(const material of [...missingRefs,...referenced]){
       if(!material.code||!material.country||material.no==null)continue;
-      const key=String(material.country).trim().toUpperCase()+'|'+material.no+'|'+String(material.code).trim().toUpperCase();
-      const sku=String(material.sku||(material.poId?poSkuMap.get(material.poId):'')||'').trim().toUpperCase();
+      const c=String(material.country).trim().toUpperCase();
+      const rawSku=String(material.sku||(material.poId?poSkuMap.get(material.poId):'')||'').trim().toUpperCase();
+      if(rawSku||material.poId){
+        expanded.push({...material,country:c,sku:rawSku});
+      }else{
+        const matchingOrders=c==='STANDARD'
+          ?versionOrders
+          :versionOrders.filter((o:any)=>String(o.country||'').trim().toUpperCase()===c);
+        if(matchingOrders.length){
+          for(const o of matchingOrders){
+            expanded.push({country:c,no:material.no,code:material.code,poId:o.id,sku:String(o.sku||'').trim().toUpperCase()});
+          }
+        }else{
+          expanded.push({...material,country:c,sku:''});
+        }
+      }
+    }
+
+    for(const material of expanded){
+      const key=material.country+'|'+material.no+'|'+String(material.code).trim().toUpperCase();
+      const sku=material.sku||'';
       const skuPoIds=sku?[...(skuPoIdsMap.get(sku)||[])]:[];
       const checkKey=key+'|'+(material.poId||'')+'|'+sku;
       if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,material.country,material.no,material.code,monthId,material.poId,skuPoIds));
