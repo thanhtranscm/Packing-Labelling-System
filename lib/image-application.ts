@@ -28,10 +28,11 @@ export function monthOrdersList(month:any):any[]{
   return list;
 }
 
-export function resolveVersionImagesForPo(images:any[],monthId:string,poId?:string,perSku=false):any[]{
+export function resolveVersionImagesForPo(images:any[],monthId:string,poId?:string,perSku=false,skuPoIds?:string[]):any[]{
   const monthImages=(images||[]).filter((im:any)=>(im.months||[]).includes(monthId));
-  if(!poId)return perSku?[]:monthImages;
-  const specific=monthImages.filter((im:any)=>Array.isArray(im.poIds)&&im.poIds.includes(poId));
+  const candidateIds=new Set<string>([...(poId?[poId]:[]),...(skuPoIds||[])]);
+  if(!candidateIds.size)return perSku?[]:monthImages;
+  const specific=monthImages.filter((im:any)=>Array.isArray(im.poIds)&&im.poIds.some((id:string)=>candidateIds.has(id)));
   if(specific.length)return specific;
   if(perSku)return [];
   return monthImages.filter((im:any)=>!im.poIds||im.poIds.length===0);

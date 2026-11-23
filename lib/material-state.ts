@@ -124,40 +124,46 @@ export function isPerSkuImage(items:any[],country:string,no:number,code?:string)
   return false;
 }
 
-export function hasMaterialImage(items:any[],country:string,no:number,code:string,monthId:string,poId?:string){
+export function hasMaterialImage(items:any[],country:string,no:number,code:string,monthId:string,poId?:string,skuPoIds?:string[]){
   const normalize=(s:any)=>String(s||'').trim().toUpperCase();
   const perSku=isPerSkuImage(items,country,no,code);
   const shared=standardImageVersion(items,{item_code:code});
-  if(shared)return resolveVersionImagesForPo(shared.images||[],monthId,poId,perSku).length>0;
-  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&resolveVersionImagesForPo(v.images||[],monthId,poId,perSku).length>0));
+  if(shared)return resolveVersionImagesForPo(shared.images||[],monthId,poId,perSku,skuPoIds).length>0;
+  return items.some(m=>normalize(m.destination)===normalize(country)&&m.list_no===no&&(m.versions||[]).some((v:any)=>normalize(v.item_code)===normalize(code)&&resolveVersionImagesForPo(v.images||[],monthId,poId,perSku,skuPoIds).length>0));
 }
 
 export function missingMaterialImages(versions:any[],items:any[],monthId:string,latestVersion:string,fallbackOrders:any[]=[]){
   const rows=new Map<string,any>(),imageChecks=new Map<string,boolean>();
   const poSkuMap=new Map<string,string>();
-  for(const o of fallbackOrders||[]){
-    if(o&&typeof o.id==='string'&&o.sku)poSkuMap.set(o.id,String(o.sku).trim().toUpperCase());
-  }
-  for(const v of versions||[]){
-    for(const o of v.orders||[]){
-      if(o&&typeof o.id==='string'&&o.sku)poSkuMap.set(o.id,String(o.sku).trim().toUpperCase());
-    }
-  }
+  const skuPoIdsMap=new Map<string,Set<string>>();
+  const registerOrder=(o:any)=>{
+    if(!o||typeof o.id!=='string')return;
+    const sku=String(o.sku||'').trim().toUpperCase();
+    if(!sku)return;
+    poSkuMap.set(o.id,sku);
+    const set=skuPoIdsMap.get(sku)||new Set<string>();
+    set.add(o.id);
+    skuPoIdsMap.set(sku,set);
+  };
+  for(const o of fallbackOrders||[])registerOrder(o);
+  for(const v of versions||[])for(const o of v.orders||[])registerOrder(o);
   for(const version of [...versions].sort((a,b)=>Number(a.id===latestVersion)-Number(b.id===latestVersion))){
     const result=version.result||{};
-    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country,no:row.item?.list_no,code:row.item?.item_code,poId:row.po?.id,sku:row.po?.sku})));
+    const referenced=['label','special','card'].flatMap(section=>(result[section]||[]).map((row:any)=>({country:row.item?.destination||row.po?.country||row.country,no:row.item?.list_no??row.no,code:row.item?.item_code||row.code,poId:row.po?.id||row.poId,sku:row.po?.sku||row.sku})));
     const missingRefs=(result.missing||[]).map((row:any)=>({country:row.country||row.item?.destination||row.po?.country,no:row.no??row.item?.list_no,code:row.code||row.item?.item_code,poId:row.poId||row.po?.id,sku:row.sku||row.po?.sku}));
     for(const material of [...missingRefs,...referenced]){
       if(!material.code||!material.country||material.no==null)continue;
       const key=String(material.country).trim().toUpperCase()+'|'+material.no+'|'+String(material.code).trim().toUpperCase();
-      const checkKey=key+'|'+(material.poId||'');
-      if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,material.country,material.no,material.code,monthId,material.poId));
+      const sku=String(material.sku||(material.poId?poSkuMap.get(material.poId):'')||'').trim().toUpperCase();
+      const skuPoIds=sku?[...(skuPoIdsMap.get(sku)||[])]:[];
+      const checkKey=key+'|'+(material.poId||'')+'|'+sku;
+      if(!imageChecks.has(checkKey))imageChecks.set(checkKey,hasMaterialImage(items,material.country,material.no,material.code,monthId,material.poId,skuPoIds));
       if(imageChecks.get(checkKey))continue;
       const perSku=isPerSkuImage(items,material.country,material.no,material.code);
-      const sku=String(material.sku||(material.poId?poSkuMap.get(material.poId):'')||material.poId||'DEFAULT').trim().toUpperCase();
+      const displaySku=sku||material.poId||'DEFAULT';
       const existing=rows.get(key);
       const skus=existing?new Set<string>(existing.missingSkus):new Set<string>();
-      skus.add(sku);
+      skus.add(displaySku);
       rows.set(key,{country:material.country,no:material.no,code:material.code,newest:version.id===latestVersion||(existing?.newest||false),perSku,missingSkus:[...skus],missingCount:skus.size});
     }
   }
