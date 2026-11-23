@@ -11,6 +11,7 @@ export function validateWorkspaceShape(data:any){
  for(const item of data.items){
   if(item.imageNote!==undefined&&(typeof item.imageNote!=='string'||item.imageNote.length>2000))throw Error('Common image note must contain at most 2000 characters.');
   if(item.quantityBasis!==undefined&&!['pair','carton'].includes(item.quantityBasis))throw Error(`${item.destination} No.${item.list_no}: invalid calculation basis.`);
+  if(item.imageMode!==undefined&&!['single','sku'].includes(item.imageMode))throw Error(`${item.destination} No.${item.list_no}: invalid image mode.`);
   if(!Number.isSafeInteger(item.list_no)||item.list_no<1||typeof item.destination!=='string'||!item.destination.trim()||!Array.isArray(item.versions))throw Error('Invalid country / No.');
   if(String(item.qty_per_finish??'').trim()===''||!Number.isFinite(Number(item.qty_per_finish))||Number(item.qty_per_finish)<0)throw Error(`${item.destination} No.${item.list_no}: quantity per pair must be zero or positive.`);
   if((outputs(item).length&&String(item.item_code||'').trim()&&!String(item.unit||'').trim())||outputs(item).some((s:string)=>!['label','special','card'].includes(s)))throw Error(`${item.destination} No.${item.list_no}: invalid unit or output sheet.`);

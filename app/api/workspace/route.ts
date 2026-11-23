@@ -102,18 +102,26 @@ export async function PATCH(req:Request){try{
   return Response.json({revision:revision+1,notes:result.notes});
  }
  if(operation==='quantity-basis'){
-  if(!Array.isArray(input.changes)||!input.changes.length||input.changes.length>data.items.length)throw Error('Invalid calculation basis changes');
+  if(!Array.isArray(input.changes)||!input.changes.length||input.changes.length>data.items.length)throw Error('Invalid material settings changes');
   const ids=new Set<string>(),items=new Map<string,any>(data.items.map((m:any)=>[m.id,m])),changes:any[]=[];
   for(const change of input.changes){
-   if(typeof change.id!=='string'||ids.has(change.id)||!['pair','carton'].includes(change.quantityBasis))throw Error('Invalid or duplicate calculation basis');
-   ids.add(change.id);const item=items.get(change.id);if(!item)throw Error('Save new No. or version with Save all before changing its calculation basis.');
-   if(item.quantityBasis!==change.quantityBasis)changes.push({path:'items / '+item.destination+' No.'+item.list_no+'.quantityBasis',before:item.quantityBasis,after:change.quantityBasis});
+   if(typeof change.id!=='string'||ids.has(change.id))throw Error('Invalid or duplicate material setting');
+   if(change.quantityBasis!==undefined&&!['pair','carton'].includes(change.quantityBasis))throw Error('Invalid calculation basis');
+   if(change.imageMode!==undefined&&!['single','sku'].includes(change.imageMode))throw Error('Invalid image mode');
+   ids.add(change.id);const item=items.get(change.id);if(!item)throw Error('Save new No. or version with Save all before changing settings.');
+   if(change.quantityBasis!==undefined&&item.quantityBasis!==change.quantityBasis){
+    changes.push({path:'items / '+item.destination+' No.'+item.list_no+'.quantityBasis',before:item.quantityBasis,after:change.quantityBasis});
+    item.quantityBasis=change.quantityBasis;
+   }
+   if(change.imageMode!==undefined&&item.imageMode!==change.imageMode){
+    changes.push({path:'items / '+item.destination+' No.'+item.list_no+'.imageMode',before:item.imageMode||'single',after:change.imageMode});
+    item.imageMode=change.imageMode;
+   }
   }
   if(!changes.length)return Response.json({revision,basis:input.changes});
-  for(const change of input.changes)items.get(change.id).quantityBasis=change.quantityBasis;
   const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
-  if(!await commitWorkspace(database,company,revision,key,user.email,'Updated material calculation basis',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
-  return Response.json({revision:revision+1,basis:input.changes.map((c:any)=>({id:c.id,quantityBasis:c.quantityBasis}))});
+  if(!await commitWorkspace(database,company,revision,key,user.email,'Updated calculation basis & SKU image settings',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
+  return Response.json({revision:revision+1,basis:input.changes.map((c:any)=>({id:c.id,quantityBasis:items.get(c.id)?.quantityBasis,imageMode:items.get(c.id)?.imageMode}))});
  }
  if(operation==='items'){
   if(!Array.isArray(input.items))throw Error('Invalid items');
