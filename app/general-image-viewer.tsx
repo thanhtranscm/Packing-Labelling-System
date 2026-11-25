@@ -1,22 +1,150 @@
 'use client';
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
-import MaterialImage from './material-image';
-import {zoomLayout,anchoredZoomScroll} from '@/lib/image-zoom';
-export default function GeneralImageViewer({src,alt,language}:any){
- const viewport=useRef<HTMLDivElement>(null),drag=useRef<any>(null),pendingScroll=useRef<{x:number,y:number}|null>(null);
- const [box,setBox]=useState({w:1,h:1}),[natural,setNatural]=useState({w:0,h:0}),[zoom,setZoom]=useState(1);
- const layout=zoomLayout(natural,box,zoom);const {fit,w,h,stageW,stageH,left,top}=layout;
- const vi=language==='VI',minZoom=Math.min(.25,1/fit),maxZoom=Math.max(16,1/fit);
- useEffect(()=>{const el=viewport.current;if(!el)return;const measure=()=>setBox({w:Math.max(1,el.clientWidth),h:Math.max(1,el.clientHeight)});measure();const observer=new ResizeObserver(measure);observer.observe(el);return()=>observer.disconnect();},[]);
- function changeZoom(next:number,x=box.w/2,y=box.h/2){
-  const el=viewport.current;if(!el)return;next=Math.max(minZoom,Math.min(maxZoom,next));
-  pendingScroll.current=anchoredZoomScroll(layout,zoomLayout(natural,box,next),{x:el.scrollLeft,y:el.scrollTop},{x,y});
-  setZoom(next);
- }
- const current=useRef(changeZoom);current.current=changeZoom;
- const currentZoom=useRef(zoom);currentZoom.current=zoom;
- useEffect(()=>{const el=viewport.current;if(!el)return;const wheel=(e:WheelEvent)=>{e.preventDefault();const rect=el.getBoundingClientRect();current.current(currentZoom.current*Math.exp(-Math.max(-100,Math.min(100,e.deltaY))*.003),e.clientX-rect.left,e.clientY-rect.top);};el.addEventListener('wheel',wheel,{passive:false});return()=>el.removeEventListener('wheel',wheel);},[]);
- useLayoutEffect(()=>{const el=viewport.current,scroll=pendingScroll.current;if(el&&scroll){el.scrollLeft=scroll.x;el.scrollTop=scroll.y;pendingScroll.current=null;}},[zoom,w,h]);
- function endDrag(e:any){drag.current=null;if(e.currentTarget.hasPointerCapture(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);}
- return <div className="general-image-viewer"><div className="general-zoom-toolbar"><button aria-label={vi?'Thu nhỏ':'Zoom out'} disabled={!natural.w||zoom<=minZoom} onClick={()=>changeZoom(zoom/1.25)}>−</button><output aria-live="polite">{Math.round(zoom*100)}%</output><button aria-label={vi?'Phóng to':'Zoom in'} disabled={!natural.w||zoom>=maxZoom} onClick={()=>changeZoom(zoom*1.25)}>+</button><button disabled={!natural.w} onClick={()=>changeZoom(1)}>{vi?'Vừa khung':'Fit to window'}</button><button disabled={!natural.w} onClick={()=>changeZoom(1/fit)}>{vi?'Kích thước gốc':'Original size'}</button></div><div ref={viewport} className="general-zoom-viewport" tabIndex={0} aria-label={vi?'Lăn chuột để phóng to, kéo để di chuyển hình':'Scroll to zoom; drag to move image'} onKeyDown={e=>{if(e.key==='+'||e.key==='='){e.preventDefault();changeZoom(zoom*1.25);}else if(e.key==='-'){e.preventDefault();changeZoom(zoom/1.25);}else if(e.key==='0'){e.preventDefault();changeZoom(1);}}} onPointerDown={e=>{if(e.button!==0||!natural.w)return;e.preventDefault();e.currentTarget.setPointerCapture(e.pointerId);drag.current={x:e.clientX,y:e.clientY,left:e.currentTarget.scrollLeft,top:e.currentTarget.scrollTop};}} onPointerMove={e=>{const start=drag.current;if(!start)return;e.currentTarget.scrollLeft=start.left+start.x-e.clientX;e.currentTarget.scrollTop=start.top+start.y-e.clientY;}} onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={()=>{drag.current=null;}} onDoubleClick={()=>changeZoom(zoom>1?1:2)} onLoadCapture={e=>{const img=e.target;if(img instanceof HTMLImageElement&&img.naturalWidth)setNatural({w:img.naturalWidth,h:img.naturalHeight});}}><div className="general-zoom-stage" style={{width:stageW,height:stageH}}><div className="general-zoom-image" style={{left,top,width:w,height:h}}><MaterialImage instant loading="eager" src={src} alt={alt} language={language} draggable={false}/></div></div></div></div>;
+
+type Props={
+ src:string;
+ alt:string;
+ language?:string;
+};
+
+export default function GeneralImageViewer({src,alt,language='EN'}:Props){
+ const vi=language==='VI';
+ const viewportRef=useRef<HTMLDivElement>(null);
+ const pendingScroll=useRef<{left:number;top:number}|null>(null);
+ const dragState=useRef<{x:number;y:number;left:number;top:number}|null>(null);
+ const [natural,setNatural]=useState<{w:number;h:number}|null>(null);
+ const [scale,setScale]=useState(1);
+ const [dragging,setDragging]=useState(false);
+
+ const applyZoom=(rawNext:number,focalX?:number,focalY?:number)=>{
+  const next=Math.min(5,Math.max(0.1,Number(rawNext.toFixed(4))));
+  const vp=viewportRef.current;
+  if(vp&&natural&&scale>0){
+   const fx=focalX??vp.clientWidth/2;
+   const fy=focalY??vp.clientHeight/2;
+   const ratio=next/scale;
+   pendingScroll.current={
+    left:(vp.scrollLeft+fx)*ratio-fx,
+    top:(vp.scrollTop+fy)*ratio-fy,
+   };
+  }
+  setScale(next);
+ };
+
+ const fitToWindow=()=>{
+  const vp=viewportRef.current;
+  if(!vp||!natural)return;
+  const availW=Math.max(120,vp.clientWidth-24);
+  const availH=Math.max(120,vp.clientHeight-24);
+  const fit=Math.min(1,availW/natural.w,availH/natural.h);
+  pendingScroll.current={left:0,top:0};
+  setScale(Math.max(0.1,Number(fit.toFixed(4))));
+ };
+
+ useLayoutEffect(()=>{
+  const vp=viewportRef.current;
+  if(!vp||!pendingScroll.current)return;
+  vp.scrollLeft=Math.max(0,pendingScroll.current.left);
+  vp.scrollTop=Math.max(0,pendingScroll.current.top);
+  pendingScroll.current=null;
+ },[scale]);
+
+ useEffect(()=>{
+  const vp=viewportRef.current;
+  if(!vp)return;
+  const onWheel=(e:WheelEvent)=>{
+   if(!natural)return;
+   e.preventDefault();
+   const rect=vp.getBoundingClientRect();
+   const factor=e.deltaY<0?1.15:1/1.15;
+   setScale(prev=>{
+    const next=Math.min(5,Math.max(0.1,Number((prev*factor).toFixed(4))));
+    const fx=e.clientX-rect.left;
+    const fy=e.clientY-rect.top;
+    const ratio=next/prev;
+    pendingScroll.current={
+     left:(vp.scrollLeft+fx)*ratio-fx,
+     top:(vp.scrollTop+fy)*ratio-fy,
+    };
+    return next;
+   });
+  };
+  vp.addEventListener('wheel',onWheel,{passive:false});
+  return()=>vp.removeEventListener('wheel',onWheel);
+ },[natural]);
+
+ const displayW=natural?Math.max(1,Math.round(natural.w*scale)):undefined;
+ const displayH=natural?Math.max(1,Math.round(natural.h*scale)):undefined;
+
+ return (
+  <div style={{display:'flex',flexDirection:'column',gap:'10px',width:'100%',userSelect:'none'}}>
+   <div className="row wrap" style={{gap:'8px',alignItems:'center'}}>
+    <button type="button" disabled={!natural||scale<=0.1} onClick={()=>applyZoom(scale/1.2)} aria-label={vi?'Thu nhỏ':'Zoom out'}>−</button>
+    <span style={{minWidth:'54px',textAlign:'center',fontWeight:600,fontVariantNumeric:'tabular-nums'}}>{Math.round(scale*100)}%</span>
+    <button type="button" disabled={!natural||scale>=5} onClick={()=>applyZoom(scale*1.2)} aria-label={vi?'Phóng to':'Zoom in'}>+</button>
+    <button type="button" disabled={!natural} onClick={fitToWindow}>{vi?'Vừa khung hình':'Fit to window'}</button>
+    <button type="button" disabled={!natural} onClick={()=>applyZoom(1)}>{vi?'Kích thước gốc':'Original size'}</button>
+    <small style={{color:'#64748b',marginLeft:'auto'}}>{vi?'Lăn chuột để phóng to/thu nhỏ · Kéo chuột để di chuyển':'Scroll to zoom · Drag to pan'}</small>
+   </div>
+   <div
+    ref={viewportRef}
+    onMouseDown={e=>{
+     if(e.button!==0||!viewportRef.current)return;
+     dragState.current={x:e.clientX,y:e.clientY,left:viewportRef.current.scrollLeft,top:viewportRef.current.scrollTop};
+     setDragging(true);
+    }}
+    onMouseMove={e=>{
+     if(!dragState.current||!viewportRef.current)return;
+     viewportRef.current.scrollLeft=dragState.current.left-(e.clientX-dragState.current.x);
+     viewportRef.current.scrollTop=dragState.current.top-(e.clientY-dragState.current.y);
+    }}
+    onMouseUp={()=>{dragState.current=null;setDragging(false);}}
+    onMouseLeave={()=>{dragState.current=null;setDragging(false);}}
+    style={{
+     width:'100%',
+     height:'74vh',
+     overflow:'auto',
+     scrollbarGutter:'stable',
+     scrollBehavior:'auto',
+     background:'#f8fafc',
+     border:'1px solid #e2e8f0',
+     borderRadius:'8px',
+     cursor:dragging?'grabbing':'grab',
+    }}
+   >
+    <div style={{display:'flex',minWidth:'100%',minHeight:'100%',padding:'12px',boxSizing:'border-box'}}>
+     <img
+      src={src}
+      alt={alt}
+      draggable={false}
+      onLoad={e=>{
+       if(natural)return;
+       const img=e.currentTarget;
+       const w=img.naturalWidth||1;
+       const h=img.naturalHeight||1;
+       setNatural({w,h});
+       const vp=viewportRef.current;
+       if(vp){
+        const availW=Math.max(120,vp.clientWidth-24);
+        const availH=Math.max(120,vp.clientHeight-24);
+        const fit=Math.min(1,availW/w,availH/h);
+        setScale(Math.max(0.1,Number(fit.toFixed(4))));
+       }
+      }}
+      style={{
+       margin:'auto',
+       display:'block',
+       width:displayW?`${displayW}px`:'auto',
+       height:displayH?`${displayH}px`:'auto',
+       maxWidth:'none',
+       maxHeight:'none',
+       transition:'none',
+       boxShadow:'0 1px 4px rgba(15,23,42,0.12)',
+       background:'#ffffff',
+      }}
+     />
+    </div>
+   </div>
+  </div>
+ );
 }
