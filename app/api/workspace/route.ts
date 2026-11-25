@@ -45,7 +45,9 @@ export async function GET(req:Request){
  const t0=Date.now();
  try{
   const url=new URL(req.url);
-  if(url.searchParams.get('ping')==='1')return Response.json({ok:true,ts:Date.now()});
+  if(url.searchParams.get('ping')==='1'){
+   return Response.json({ok:true,ts:Date.now()},{headers:{'Cache-Control':'no-store','X-Worker-Ms':String(Date.now()-t0)}});
+  }
   const user=await readStage('account/database',()=>identity());
   const company=url.searchParams.get('company');
   if(!['WSV','CTC'].includes(company||''))throw Error('Invalid workspace');
