@@ -55,9 +55,9 @@ const [importSession,setImportSession]=useState<any>(null);
 const [unresolvedVersions,setUnresolvedVersions]=useState<any[]>([]);
 const [copySource,setCopySource]=useState('');
 const [searchSuggestionsOpen,setSearchSuggestionsOpen]=useState(false);
-const [serverStop,setServerStop]=useState<{ms:number;mb:string;checkAt:number;probing:boolean}|null>(null);
+const [serverStop,setServerStop]=useState<{startedAt:number;minReadyAt:number;stableStreak:number;reason:'1102'|'load'}|null>(null);
 const [stopSeconds,setStopSeconds]=useState(0);
-const [bootRetryLeft,setBootRetryLeft]=useState(0);
+const [bootElapsed,setBootElapsed]=useState(0);
 const {users,usersReady,usersLoading,usersError,refreshUsers}=useAuthorizedUsers(user,page);
 useEffect(()=>{setImportSession(null);},[company,monthId,page]);
 const t=(s:string)=>language==='VI'?vi[s]||s:s;
@@ -72,15 +72,15 @@ useEffect(()=>{
  if(!isServerStopped){setStopSeconds(0);return;}
  let cancelled=false;
  let inFlight=false;
+ let nextProbeAt=Date.now()+1500;
  const tick=async()=>{
   if(cancelled)return;
   const cur=serverStopRef.current;
   if(!cur)return;
-  const left=Math.max(0,Math.ceil((cur.checkAt-Date.now())/1000));
-  setStopSeconds(left);
-  if(left>0||inFlight)return;
+  const now=Date.now();
+  setStopSeconds(Math.max(1,Math.floor((now-cur.startedAt)/1000)+1));
+  if(now<cur.minReadyAt||now<nextProbeAt||inFlight)return;
   inFlight=true;
-  setServerStop(prev=>prev?{...prev,probing:true}:null);
   const pingStart=Date.now();
   const ctrl=new AbortController();
   const timeout=setTimeout(()=>ctrl.abort(),5000);
@@ -89,18 +89,28 @@ useEffect(()=>{
    const workerMs=Number(r.headers.get('X-Worker-Ms')||0);
    const roundTripMs=Date.now()-pingStart;
    const text=await r.text();
-   let ok=false;
-   try{const j=JSON.parse(text);ok=r.ok&&!!j?.ok;}catch{}
+   let j:any=null;
+   try{j=JSON.parse(text);}catch{}
    if(cancelled)return;
-   const healthy=ok&&(workerMs>0?workerMs<800:roundTripMs<2500);
+   const healthy=r.ok&&!!j?.ok&&!j?.cooling&&(workerMs>0?workerMs<600:roundTripMs<2000);
    if(healthy){
-    saveTimestamps.current=[];
-    setServerStop(null);
+    const nextStreak=(serverStopRef.current?.stableStreak||0)+1;
+    if(nextStreak>=2){
+     saveTimestamps.current=[];
+     setServerStop(null);
+    }else{
+     setServerStop(prev=>prev?{...prev,stableStreak:nextStreak}:null);
+     nextProbeAt=Date.now()+1800;
+    }
    }else{
-    setServerStop(prev=>prev?{...prev,ms:workerMs||roundTripMs,checkAt:Date.now()+3000,probing:false}:null);
+    setServerStop(prev=>prev?{...prev,stableStreak:0}:null);
+    nextProbeAt=Date.now()+2500;
    }
   }catch{
-   if(!cancelled)setServerStop(prev=>prev?{...prev,checkAt:Date.now()+3000,probing:false}:null);
+   if(!cancelled){
+    setServerStop(prev=>prev?{...prev,stableStreak:0}:null);
+    nextProbeAt=Date.now()+3000;
+   }
   }finally{
    clearTimeout(timeout);
    inFlight=false;
@@ -112,34 +122,70 @@ useEffect(()=>{
 },[isServerStopped,company]);
 
 useEffect(()=>{
- if(ws||!error||!/1102|CPU\/RAM/i.test(error)){setBootRetryLeft(0);return;}
- const retryAt=Date.now()+8000;
- setBootRetryLeft(8);
- const timer=setInterval(()=>{
-  const left=Math.max(0,Math.ceil((retryAt-Date.now())/1000));
-  setBootRetryLeft(left);
-  if(left===0){
-   clearInterval(timer);
-   void load(company);
+ if(ws||!error||!/1102|CPU\/RAM/i.test(error)){setBootElapsed(0);return;}
+ const startedAt=Date.now();
+ const minReadyAt=startedAt+6000;
+ let cancelled=false;
+ let inFlight=false;
+ let nextProbeAt=minReadyAt;
+ let stableStreak=0;
+ setBootElapsed(1);
+ const timer=setInterval(async()=>{
+  if(cancelled)return;
+  const now=Date.now();
+  setBootElapsed(Math.max(1,Math.floor((now-startedAt)/1000)+1));
+  if(now<nextProbeAt||inFlight)return;
+  inFlight=true;
+  try{
+   const r=await fetch('/api/workspace?company='+encodeURIComponent(company)+'&ping=1',{cache:'no-store'});
+   const text=await r.text();
+   let j:any=null;
+   try{j=JSON.parse(text);}catch{}
+   if(cancelled)return;
+   if(r.ok&&j?.ok&&!j?.cooling){
+    stableStreak++;
+    if(stableStreak>=2){
+     clearInterval(timer);
+     void load(company);
+     return;
+    }
+    nextProbeAt=Date.now()+1800;
+   }else{
+    stableStreak=0;
+    nextProbeAt=Date.now()+2500;
+   }
+  }catch{
+   stableStreak=0;
+   nextProbeAt=Date.now()+3000;
+  }finally{
+   inFlight=false;
   }
  },300);
- return()=>clearInterval(timer);
+ return()=>{cancelled=true;clearInterval(timer);};
 },[ws,error,company]);
+
+const triggerServerStop=(reason:'1102'|'load',minWaitMs:number)=>{
+ const now=Date.now();
+ setServerStop(prev=>({
+  startedAt:prev?.startedAt||now,
+  minReadyAt:Math.max(prev?.minReadyAt||0,now+minWaitMs),
+  stableStreak:0,
+  reason:reason==='1102'||prev?.reason==='1102'?'1102':'load',
+ }));
+};
 
 const recordServerHealth=(r:Response,reqStart:number,isWrite:boolean)=>{
  const workerMs=Number(r.headers.get('X-Worker-Ms')||0);
  const wsBytes=Number(r.headers.get('X-Workspace-Bytes')||0);
  const elapsedMs=workerMs||(Date.now()-reqStart);
- const mb=wsBytes>0?(wsBytes/1048576).toFixed(1):'—';
  if(isWrite){
   const now=Date.now();
   lastWriteAt.current=now;
-  saveTimestamps.current=[...saveTimestamps.current.filter(ts=>now-ts<15000),now];
+  saveTimestamps.current=[...saveTimestamps.current.filter(ts=>now-ts<18000),now];
   const recent=saveTimestamps.current.length;
-  const heavyPayload=wsBytes>=4*1048576&&recent>=2;
-  if(elapsedMs>=900||recent>=3||heavyPayload){
-   const waitMs=elapsedMs>=1400||recent>=4?7000:5000;
-   setServerStop({ms:elapsedMs,mb,checkAt:now+waitMs,probing:false});
+  const heavyPayload=wsBytes>=3*1048576&&recent>=2;
+  if(elapsedMs>=850||recent>=3||heavyPayload){
+   triggerServerStop('load',elapsedMs>=1400||recent>=4?6500:4500);
   }
  }
 };
@@ -152,9 +198,8 @@ const parseApiResponse=async(r:Response,reqStart=Date.now(),isWrite=false)=>{
  if(!j){
   const is1102=r.status>=500||/1102|exceeded|resource limits|cpu time/i.test(text);
   if(is1102){
-   const wsBytes=Number(r.headers.get('X-Workspace-Bytes')||0);
-   setServerStop({ms:Date.now()-reqStart,mb:wsBytes>0?(wsBytes/1048576).toFixed(1):'—',checkAt:Date.now()+8000,probing:false});
-   throw Error(language==='VI'?'Máy chủ Cloudflare vừa chạm giới hạn CPU/RAM (Error 1102). Hệ thống đang ở trạng thái DỪNG và sẽ tự kiểm tra lại sau 8 giây.':'Cloudflare Worker hit its CPU/RAM limit (Error 1102). System is in STOP mode and will re-check automatically in 8 seconds.');
+   triggerServerStop('1102',9000);
+   throw Error(language==='VI'?'Máy chủ Cloudflare vừa chạm giới hạn CPU/RAM (Error 1102). Hệ thống đang ở trạng thái DỪNG và sẽ tự động kiểm tra liên tục cho đến khi máy chủ thật sự ổn định mới mở khóa.':'Cloudflare Worker hit its CPU/RAM limit (Error 1102). System is in STOP mode and will continuously verify stability until the server is completely ready before unlocking.');
   }
   throw Error(language==='VI'?'Phiên đăng nhập Cloudflare Access đã hết hạn hoặc bị gián đoạn. Hãy nhấn F5 tải lại trang để xác thực lại.':'Cloudflare Access session expired or interrupted. Press F5 to reload and sign in again.');
  }
@@ -170,7 +215,7 @@ const request=async(url:string,options?:any)=>{
  }
  if(isWrite&&lastWriteAt.current>0){
   const gap=Date.now()-lastWriteAt.current;
-  if(gap<2200)await new Promise(resolve=>setTimeout(resolve,2200-gap));
+  if(gap<2500)await new Promise(resolve=>setTimeout(resolve,2500-gap));
  }
  const reqStart=Date.now();
  const r=await fetch(url,options);
@@ -441,7 +486,7 @@ function imageNameWarning(im:any){const issue=imageNameIssue(im,ws.months);retur
 
 function POtable(){return <><div className="toolbar"><span>{t('Total POs')}: <b>{controls.filter((o:any)=>!o.previousOnly).length}</b> · {t('Selected POs')}: <b>{selected.length}</b> · {t('Visible POs')}: <b>{visible.length}</b></span><div className="row"><button onClick={()=>setSelected([...new Set([...selected,...visible.filter(o=>!o.previousOnly).map(o=>o.id)])])}>{t('Select all shown')}</button><button onClick={()=>setSelected(selected.filter(id=>!visible.some(o=>o.id===id)))}>{t('Unselect all shown')}</button><button onClick={()=>setFilter({})}>{t('Clear Data').replace('Data','Filter')}</button></div></div><div className="po-scroll full-po-list"><Table><colgroup>{[3,12,13,12,10,12,10,10,10,8].map((width,i)=><col key={i} style={{width:width+'%'}}/>)}</colgroup><TableHeader><TableRow><TableHead><div className="po-column-heading po-select-heading">✓</div><div className="po-filter-space" aria-hidden="true"/></TableHead>{columns.map(([key,label])=><TableHead key={key}><div className="po-column-heading">{label}</div><ColumnFilter label={label} values={filterOptions[key]} numeric={key==='total'} selected={filter[key]||[]} language={language} display={value=>key==='status'?t(value):key==='exgo'?exgoLabel(value,monthCalendar):key==='total'?Number(value).toLocaleString():value} renderValue={key==='country'?(value=><CountryLabel value={value}/>):undefined} onChange={values=>setFilter((current:any)=>({...current,[key]:values}))}/></TableHead>)}</TableRow></TableHeader><TableBody>{!visible.length&&<TableRow><TableCell colSpan={columns.length+1} className="po-empty-result">{language==='VI'?'Không có PO phù hợp với bộ lọc.':'No POs match the filters.'}</TableCell></TableRow>}{visible.map((o:any)=><TableRow key={o.id} className={o.previousOnly?'muted-row':'selectable-po-row'} data-selected={selectedIds.has(o.id)} onClick={e=>{if(o.previousOnly||(e.target as HTMLElement).closest('button,a,input,[role=checkbox]'))return;setSelected(current=>current.includes(o.id)?current.filter(id=>id!==o.id):[...current,o.id]);}}><TableCell><Checkbox aria-label={'Select '+o.onPo} checked={selectedIds.has(o.id)} disabled={o.previousOnly} onCheckedChange={c=>setSelected(c?[...selected,o.id]:selected.filter(a=>a!==o.id))}/></TableCell>{columns.map(([k])=><TableCell key={k}>{k==='total'?(o.total??0).toLocaleString():k==='status'?<span className={'badge status-'+poStatus(o)}>{t(poStatus(o))}{poStatus(o)==='Updated'?' '+(month.updatedCounts?.[o.id]||1):''}</span>:k==='onPo'?<b className="po-number">{o[k]}</b>:k==='country'?<CountryLabel value={o[k]}/>:k==='exgo'?exgoLabel(o[k]||'—',monthCalendar):o[k]||'—'}</TableCell>)}</TableRow>)}</TableBody>{runTotal.count>0&&<tfoot className="po-qty-footer"><TableRow><TableCell colSpan={columns.length}>TOTAL QTY <small>{language==='VI'?'(đã chạy Excel)':'(generated Excel)'}</small></TableCell><TableCell>{runTotal.total.toLocaleString()}</TableCell></TableRow></tfoot>}</Table></div></>;}
 if(!signedIn)return <div className="signin"><Boxes size={48}/><h1>Packing & Labelling</h1><p>WSV · CTC</p><a className="button primary" href="/signin-with-chatgpt?return_to=%2F" target="_top">Sign in with ChatGPT</a></div>;
-if(!ws)return <div id="pls-workspace-loading" className="signin"><Boxes size={48}/><h1>Packing & Labelling</h1>{error?<><p className="error">{error}</p>{bootRetryLeft>0&&<p style={{fontWeight:700,color:'#991b1b'}}>{language==='VI'?`🛑 DỪNG · Tự động kết nối lại sau ${bootRetryLeft}s...`:`🛑 STOP · Reconnecting automatically in ${bootRetryLeft}s...`}</p>}<button disabled={busy||bootRetryLeft>0} onClick={()=>load()}>{language==='VI'?'Thử lại':'Retry'}</button><button disabled={busy||bootRetryLeft>0} onClick={()=>setCompany(company==='WSV'?'CTC':'WSV')}>{language==='VI'?'Mở ':'Open '}{company==='WSV'?'CTC':'WSV'}</button><a href="/signout-with-chatgpt?return_to=/">Sign out</a></>:<><p>{language==='VI'?'Đang tải dữ liệu…':'Loading workspace…'}</p><div id="pls-boot-recovery" hidden><p id="pls-boot-message"/><button type="button" data-pls-reload>{language==='VI'?'Tải lại trang':'Reload page'}</button></div></>}</div>;
+if(!ws)return <div id="pls-workspace-loading" className="signin"><Boxes size={48}/><h1>Packing & Labelling</h1>{error?<><p className="error">{error}</p>{bootElapsed>0&&<p style={{fontWeight:700,color:'#991b1b'}}>{language==='VI'?`🛑 DỪNG · Đang chờ máy chủ ổn định lại (${bootElapsed}s)...`:`🛑 STOP · Waiting for server to stabilize (${bootElapsed}s)...`}</p>}<button disabled={busy||bootElapsed>0} onClick={()=>load()}>{language==='VI'?'Thử lại':'Retry'}</button><button disabled={busy} onClick={()=>setCompany(company==='WSV'?'CTC':'WSV')}>{language==='VI'?'Mở ':'Open '}{company==='WSV'?'CTC':'WSV'}</button><a href="/signout-with-chatgpt?return_to=/">Sign out</a></>:<><p>{language==='VI'?'Đang tải dữ liệu…':'Loading workspace…'}</p><div id="pls-boot-recovery" hidden><p id="pls-boot-message"/><button type="button" data-pls-reload>{language==='VI'?'Tải lại trang':'Reload page'}</button></div></>}</div>;
 const countries=[...new Set(items.map(m=>m.destination))].sort((a,b)=>a==='STANDARD'?-1:b==='STANDARD'?1:a.localeCompare(b));
 const monthBufferRows=sortMonths<any>(ws.months||[]).map((m:any)=>({month:m,groups:purchaseBufferSummary(m.settings,ws.items||[],m)}));
 const monthBufferColumns:{key:string;label:string;custom:boolean}[]=[];
@@ -450,7 +495,7 @@ const monthOptions=monthBufferRows.map(({month:m,groups})=>{const values=new Map
 
 let settingIssue='';if(page==='Master Data'&&month&&settings&&profile){try{prepareMonthSettings({...month,settings,profiles:sizeProfiles,profileId},ws);}catch(e:any){settingIssue=e.message;}}
 const locked=busy||!!serverStop;
-return <CountryToneProvider items={ws.items}><PanelContext.Provider value={{open,setOpen,t}}><SidebarProvider><Toaster position="top-right" richColors/>{loadedCompany!==company&&<div className="busy-bar" role={error?'alert':'status'} aria-live="polite">{error?<div className="processing-card workspace-switch-error"><p>{error}</p><div className="row wrap"><button disabled={busy} onClick={()=>load()}>{language==='VI'?'Thử lại':'Retry'}</button><button disabled={busy} onClick={()=>switchCompany(loadedCompany)}>{language==='VI'?'Quay lại ':'Back to '}{loadedCompany}</button></div></div>:<div className="processing-card"><span className="processing-spinner" aria-hidden="true"/>{language==='VI'?'Đang xử lý…':'Processing…'}</div>}</div>}<FullscreenButton language={language}/>{importSession&&<ImportMapping key={importSession.company+'|'+importSession.monthId+'|'+importSession.page} file={importSession.file} company={company} profile={importSession.profile} language={language} admin={admin} initialError={importSession.error} initialMapping={importSession.mapping} onClose={()=>setImportSession(null)} onConfirm={confirmMappedImport}/>}<div className="portal" inert={loadedCompany!==company}><header className="topbar"><div className="topbar-start"><div className="brand"><Boxes/><span>Packing & Labelling</span></div><div className="company-switch">{['WSV','CTC'].map(c=><button key={c} disabled={busy} aria-pressed={company===c} className={company===c?'chosen':''} onClick={()=>switchCompany(c)}>{c}</button>)}{admin&&<button aria-label="Rename workspace" disabled={locked||loadedCompany!==company} onClick={()=>setDialog({type:'rename',name:ws.name})}><Pencil size={15}/></button>}</div></div><form className="search" onSubmit={e=>{e.preventDefault();search();}} onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setSearchSuggestionsOpen(false);}} onKeyDown={e=>{if(e.key==='Escape')setSearchSuggestionsOpen(false);}}><input placeholder={t('Search processed PO across all months')} value={query} onFocus={()=>setSearchSuggestionsOpen(true)} onChange={e=>{setQuery(e.target.value);setSearchSuggestionsOpen(true);}} aria-expanded={searchSuggestionsOpen&&!!norm(query)} aria-controls="global-po-suggestions" autoComplete="off"/><button type="submit" aria-label={language==='VI'?'Tìm kiếm':'Search'}><Search size={19}/></button>{searchSuggestionsOpen&&!!norm(query)&&<div className="global-po-suggestions" id="global-po-suggestions"><div className="global-po-suggestions-heading">{language==='VI'?'PO phù hợp':'Matching POs'} · {searchMatches.length}</div>{!searchMatches.length?<div className="global-po-suggestions-empty">{t('No matching POs')}</div>:<div className="global-po-suggestions-list">{searchMatches.slice(0,100).map(({o,m}:any)=><button type="button" className="global-po-suggestion" key={m.id+'|'+o.id} onClick={()=>{setSearchSuggestionsOpen(false);poInfo([o],m,true);}}><span className="global-po-suggestion-primary"><b>{o.factoryPo||o.onPo}</b><span>{o.onPo&&o.onPo!==o.factoryPo?o.onPo:'—'}</span></span><span className={"global-po-suggestion-country market-tone-"+(searchCountryTones.get(String(o.country||'').trim().toUpperCase())||'')} title={({replace:language==='VI'?'Thay thế':'Replace',extra:language==='VI'?'Bổ sung':'Extra',both:language==='VI'?'Thay thế và bổ sung':'Replace and extra'} as Record<string,string>)[searchCountryTones.get(String(o.country||'').trim().toUpperCase())||'']||'Standard'}>{o.country||'—'}</span><span className="global-po-suggestion-month">{m.name}{(ws.poMonthNotices||[]).filter((n:any)=>noticeKey(n.sourceMonthId,n.poId)===noticeKey(m.id,o.id)).map((n:any)=><strong key={n.poId}>{language==='VI'?'EXGO mới: ':'New EXGO: '}{n.newMonth}</strong>)}</span></button>)}</div>}{searchMatches.length>100&&<button type="submit" className="global-po-suggestions-more">{language==='VI'?'Xem tất cả kết quả':'View all results'} ({searchMatches.length})</button>}</div>}</form><div className="topbar-account"><button className="language" onClick={()=>setLanguage(language==='EN'?'VI':'EN')}><Globe size={16}/>{language}</button>{serverStop&&<div role="alert" aria-live="assertive" title={(language==='VI'?'Phản hồi gần nhất: ':'Last response: ')+`${(serverStop.ms/1000).toFixed(1)}s${serverStop.mb!=='—'?' · '+serverStop.mb+' MB':''}`} style={{padding:'5px 12px',borderRadius:'999px',display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'12px',fontWeight:700,lineHeight:1.2,whiteSpace:'nowrap',background:'#fef2f2',border:'1.5px solid #ef4444',color:'#991b1b',boxShadow:'0 1px 2px rgba(220,38,38,0.12)'}}><span>{serverStop.probing?(language==='VI'?'🛑 DỪNG · Đang kiểm tra máy chủ...':'🛑 STOP · Checking server...'):(language==='VI'?`🛑 DỪNG · Chờ hồi phục (${stopSeconds}s)`:`🛑 STOP · Cooling down (${stopSeconds}s)`)}</span></div>}<div className="account"><b>{user?.displayName}</b><small>{user?.email}</small></div><a href="/signout-with-chatgpt?return_to=/" title="Sign out">↪</a></div></header><Sidebar className="side"><SidebarContent><SidebarMenu>{[['Dashboard',LayoutDashboard],['Master Data',Database],...(admin?[['Balance review',ClipboardCheck],['PO month notices',CalendarDays]]:[]),['General Information',FileImage],['Production Materials',Factory],['User access',Users],...(user?.role==='owner'?[['Website backup',Archive]]:[])].filter(([name])=>admin||name!=='User access').map(([name,Icon]:any)=><SidebarMenuItem key={name}><SidebarMenuButton isActive={page===name} onClick={()=>navigate(name)}><Icon size={18}/><span>{t(name)}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu><div className="role"><Shield size={18}/>{user?.role==='owner'?'Administrator':user?.role==='admin'?'Admin':'User'}</div></SidebarContent></Sidebar><main className="workspace"><div className="mobile-nav"><Picker value={page} onChange={navigate} options={['Dashboard','Master Data',...(admin?['Balance review','PO month notices']:[]),'General Information','Production Materials',...(admin?['User access']:[]),...(user?.role==='owner'?['Website backup']:[])].map(v=>({value:v,label:t(v)}))}/></div><div className="page-heading"><div><h1>{t(page==='Dashboard'?'Monthly PO workspace':page==='Master Data'?'Master Data':page==='Production Materials'?'Production Material Usage':page)}</h1><span className="company-badge">{ws.name}</span></div>{page==='Dashboard'&&admin&&<button className="primary" disabled={locked} onClick={()=>setDialog({type:'create',year:2026,month:11,prefix:'',exgoYear:monthCalendar.year,exgoMonth:monthCalendar.month})}><Plus size={16}/>{t('Create month')}</button>}</div>{(reuseSaving||monthSaving)&&<div className="reuse-saving-status" role="status">{monthSaving?(language==='VI'?'Đang lưu Show/Hide…':'Saving month visibility…'):(language==='VI'?'Đang lưu Reuse…':'Saving Reuse…')}</div>}{busy&&loadedCompany===company&&<div className="busy-bar" role="status" aria-live="polite"><div className="processing-card"><span className="processing-spinner" aria-hidden="true"/>{language==='VI'?'Đang xử lý…':'Processing…'}</div></div>}
+return <CountryToneProvider items={ws.items}><PanelContext.Provider value={{open,setOpen,t}}><SidebarProvider><Toaster position="top-right" richColors/>{loadedCompany!==company&&<div className="busy-bar" role={error?'alert':'status'} aria-live="polite">{error?<div className="processing-card workspace-switch-error"><p>{error}</p><div className="row wrap"><button disabled={busy} onClick={()=>load()}>{language==='VI'?'Thử lại':'Retry'}</button><button disabled={busy} onClick={()=>switchCompany(loadedCompany)}>{language==='VI'?'Quay lại ':'Back to '}{loadedCompany}</button></div></div>:<div className="processing-card"><span className="processing-spinner" aria-hidden="true"/>{language==='VI'?'Đang xử lý…':'Processing…'}</div>}</div>}<FullscreenButton language={language}/>{importSession&&<ImportMapping key={importSession.company+'|'+importSession.monthId+'|'+importSession.page} file={importSession.file} company={company} profile={importSession.profile} language={language} admin={admin} initialError={importSession.error} initialMapping={importSession.mapping} onClose={()=>setImportSession(null)} onConfirm={confirmMappedImport}/>}<div className="portal" inert={loadedCompany!==company}><header className="topbar"><div className="topbar-start"><div className="brand"><Boxes/><span>Packing & Labelling</span></div><div className="company-switch">{['WSV','CTC'].map(c=><button key={c} disabled={busy} aria-pressed={company===c} className={company===c?'chosen':''} onClick={()=>switchCompany(c)}>{c}</button>)}{admin&&<button aria-label="Rename workspace" disabled={locked||loadedCompany!==company} onClick={()=>setDialog({type:'rename',name:ws.name})}><Pencil size={15}/></button>}</div></div><form className="search" onSubmit={e=>{e.preventDefault();search();}} onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setSearchSuggestionsOpen(false);}} onKeyDown={e=>{if(e.key==='Escape')setSearchSuggestionsOpen(false);}}><input placeholder={t('Search processed PO across all months')} value={query} onFocus={()=>setSearchSuggestionsOpen(true)} onChange={e=>{setQuery(e.target.value);setSearchSuggestionsOpen(true);}} aria-expanded={searchSuggestionsOpen&&!!norm(query)} aria-controls="global-po-suggestions" autoComplete="off"/><button type="submit" aria-label={language==='VI'?'Tìm kiếm':'Search'}><Search size={19}/></button>{searchSuggestionsOpen&&!!norm(query)&&<div className="global-po-suggestions" id="global-po-suggestions"><div className="global-po-suggestions-heading">{language==='VI'?'PO phù hợp':'Matching POs'} · {searchMatches.length}</div>{!searchMatches.length?<div className="global-po-suggestions-empty">{t('No matching POs')}</div>:<div className="global-po-suggestions-list">{searchMatches.slice(0,100).map(({o,m}:any)=><button type="button" className="global-po-suggestion" key={m.id+'|'+o.id} onClick={()=>{setSearchSuggestionsOpen(false);poInfo([o],m,true);}}><span className="global-po-suggestion-primary"><b>{o.factoryPo||o.onPo}</b><span>{o.onPo&&o.onPo!==o.factoryPo?o.onPo:'—'}</span></span><span className={"global-po-suggestion-country market-tone-"+(searchCountryTones.get(String(o.country||'').trim().toUpperCase())||'')} title={({replace:language==='VI'?'Thay thế':'Replace',extra:language==='VI'?'Bổ sung':'Extra',both:language==='VI'?'Thay thế và bổ sung':'Replace and extra'} as Record<string,string>)[searchCountryTones.get(String(o.country||'').trim().toUpperCase())||'']||'Standard'}>{o.country||'—'}</span><span className="global-po-suggestion-month">{m.name}{(ws.poMonthNotices||[]).filter((n:any)=>noticeKey(n.sourceMonthId,n.poId)===noticeKey(m.id,o.id)).map((n:any)=><strong key={n.poId}>{language==='VI'?'EXGO mới: ':'New EXGO: '}{n.newMonth}</strong>)}</span></button>)}</div>}{searchMatches.length>100&&<button type="submit" className="global-po-suggestions-more">{language==='VI'?'Xem tất cả kết quả':'View all results'} ({searchMatches.length})</button>}</div>}</form><div className="topbar-account"><button className="language" onClick={()=>setLanguage(language==='EN'?'VI':'EN')}><Globe size={16}/>{language}</button>{serverStop&&<div role="alert" aria-live="assertive" style={{padding:'5px 12px',borderRadius:'999px',display:'inline-flex',alignItems:'center',gap:'6px',fontSize:'12px',fontWeight:700,lineHeight:1.2,whiteSpace:'nowrap',background:'#fef2f2',border:'1.5px solid #ef4444',color:'#991b1b',boxShadow:'0 1px 2px rgba(220,38,38,0.12)'}}><span>{language==='VI'?`🛑 DỪNG · Đang ổn định máy chủ (${stopSeconds}s)...`:`🛑 STOP · Stabilizing server (${stopSeconds}s)...`}</span></div>}<div className="account"><b>{user?.displayName}</b><small>{user?.email}</small></div><a href="/signout-with-chatgpt?return_to=/" title="Sign out">↪</a></div></header><Sidebar className="side"><SidebarContent><SidebarMenu>{[['Dashboard',LayoutDashboard],['Master Data',Database],...(admin?[['Balance review',ClipboardCheck],['PO month notices',CalendarDays]]:[]),['General Information',FileImage],['Production Materials',Factory],['User access',Users],...(user?.role==='owner'?[['Website backup',Archive]]:[])].filter(([name])=>admin||name!=='User access').map(([name,Icon]:any)=><SidebarMenuItem key={name}><SidebarMenuButton isActive={page===name} onClick={()=>navigate(name)}><Icon size={18}/><span>{t(name)}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu><div className="role"><Shield size={18}/>{user?.role==='owner'?'Administrator':user?.role==='admin'?'Admin':'User'}</div></SidebarContent></Sidebar><main className="workspace"><div className="mobile-nav"><Picker value={page} onChange={navigate} options={['Dashboard','Master Data',...(admin?['Balance review','PO month notices']:[]),'General Information','Production Materials',...(admin?['User access']:[]),...(user?.role==='owner'?['Website backup']:[])].map(v=>({value:v,label:t(v)}))}/></div><div className="page-heading"><div><h1>{t(page==='Dashboard'?'Monthly PO workspace':page==='Master Data'?'Master Data':page==='Production Materials'?'Production Material Usage':page)}</h1><span className="company-badge">{ws.name}</span></div>{page==='Dashboard'&&admin&&<button className="primary" disabled={locked} onClick={()=>setDialog({type:'create',year:2026,month:11,prefix:'',exgoYear:monthCalendar.year,exgoMonth:monthCalendar.month})}><Plus size={16}/>{t('Create month')}</button>}</div>{(reuseSaving||monthSaving)&&<div className="reuse-saving-status" role="status">{monthSaving?(language==='VI'?'Đang lưu Show/Hide…':'Saving month visibility…'):(language==='VI'?'Đang lưu Reuse…':'Saving Reuse…')}</div>}{busy&&loadedCompany===company&&<div className="busy-bar" role="status" aria-live="polite"><div className="processing-card"><span className="processing-spinner" aria-hidden="true"/>{language==='VI'?'Đang xử lý…':'Processing…'}</div></div>}
 {page==='Dashboard'&&<>{!month?<div className="empty">{language==='VI'?'Tạo tháng để bắt đầu.':'Create a month to begin.'}</div>:<Tabs value={tab} onValueChange={setTab}><TabsList className="workspace-tabs"><TabsTrigger value="files">{t('Months & files')}</TabsTrigger><TabsTrigger value="control">{t('PO Control')}</TabsTrigger></TabsList><TabsContent value="files"><section className="panel month-card"><div className="panel-body"><div className="month-overview"><div><label>{t('Show month')}</label><div className="month-select-row"><Picker value={month.id} onChange={switchMonth} options={monthOptions}/>{admin&&<button className="danger" disabled={locked} onClick={()=>ask(t('Delete month'),()=>save({...ws,months:ws.months.filter((m:any)=>m.id!==month.id)},'Deleted month'))}>{t('Delete month')}</button>}</div><div className="row wrap mt"><label>{t('Month status')}</label>{admin?<Picker value={month.status} disabled={!admin||locked} onChange={v=>editMonth({status:v},'Month status updated')} options={['Active','Reroute','Cancelled'].map(v=>({value:v,label:v==='Cancelled'?(language==='VI'?'Đã hủy':'Cancelled'):t(v),tone:'month-'+v.toLowerCase(),disabled:v==='Reroute'&&month.versions.length<2}))}/>:<span className={'month-state state-'+month.status}>{t(month.status)}</span>}{admin&&<><button disabled={locked} onClick={()=>setDialog({type:'prefix',prefix:month.prefix})}><Pencil size={14}/>{t('Edit prefix')}</button></>}</div></div><div className="metric"><small>POs available</small><b>{month.latest.length}</b></div><div className="metric"><small>Files published</small><b>{month.versions.length}</b></div><div className="metric"><small>Pending POs</small><b>{pendingPoCount}</b></div>{admin&&<Picker value={month.show?'Show':'Hide'} disabled={locked||!!monthSaving} onChange={v=>setMonthVisibility(v==='Show')} options={['Show','Hide'].map(v=>({value:v,label:t(v),tone:'visibility-'+v.toLowerCase()}))}/>}</div><BufferSummary settings={month.settings} items={ws.items} month={month}/></div>{missing.length>0&&<div className="missing"><div className="row spread wrap missing-heading"><h3>{t('Missing Item Images')} ({missingGroups.length})</h3><div className="missing-legend"><span><i className="latest-dot"/>{language==='VI'?'File mới nhất':'Latest file'}</span><span><i className="previous-dot"/>{language==='VI'?'File trước đó':'Previous files'}</span></div></div><div className="row wrap">{missingGroups.map(group=>(group.rows.length===1||items.some(s=>s.destination==='STANDARD'&&s.versions.some((v:any)=>norm(v.item_code)===norm(group.code))))?<button key={norm(group.code)} title={group.rows[0].country+' · No.'+group.rows[0].no+(group.perSku&&group.missingCount>0?` (${group.missingCount} SKU)`:'')} className={'missing-code missing-type-'+missingItemTone(group)} onClick={()=>jumpMissing((()=>{const s=items.find(s=>s.destination==='STANDARD'&&s.versions.some((v:any)=>norm(v.item_code)===norm(group.code)));return s?{country:'STANDARD',no:s.list_no}:group.rows[0];})())}><i className={group.newest?'latest-dot':'previous-dot'} aria-hidden="true"/>{group.code}{group.perSku&&group.missingCount>0?` (${group.missingCount})`:''}</button>:<Popover key={norm(group.code)} modal={false}><PopoverTrigger asChild><button className={'missing-code missing-type-'+missingItemTone(group)} title={group.rows.map((m:any)=>m.country+' · No.'+m.no+(m.perSku&&m.missingCount>0?` (${m.missingCount})`:'')).join(', ')}><i className={group.newest?'latest-dot':'previous-dot'} aria-hidden="true"/>{group.code}{group.perSku&&group.missingCount>0?` (${group.missingCount})`:''}</button></PopoverTrigger><PopoverContent className="missing-country-menu" align="start"><b>{group.code}</b><small>{language==='VI'?'Chọn quốc gia cần bổ sung hình':'Choose the country to add an image'}</small>{group.rows.map((m:any)=><button key={m.country+'|'+m.no} className={'missing-country-choice '+(m.newest?'newest-missing':'old-missing')} onClick={()=>jumpMissing(m)}>{m.country} · No.{m.no}{m.perSku&&m.missingCount>0?` (${m.missingCount})`:''}<span>{m.newest?t('Latest'):t('Previous version')}</span></button>)}</PopoverContent></Popover>)}</div></div>}<ProcessedPoPanel onExportProduction={exportPoProduction} key={company+'|'+month.id+'|'+month.latestVersion} month={month} ws={ws} company={company} language={language} highlight={poHighlight} onImage={(im:any)=>setImageDialog({type:'image',image:im})}/></section>{Changes()}<section className="panel"><div className="version-list">{[...month.versions].reverse().map((v:any)=><div className="file-row" key={v.id}><Star size={21} fill={v.id===month.latestVersion?'#dce9ff':'none'}/><div className="file-title"><b>{v.name}</b><span className="badge">{t(v.id===month.latestVersion?'Latest':'Previous version')}</span><small>{new Date(v.created).toLocaleString()} · {v.actor}</small>{v.historicalWarning&&<small className="error">{language==='VI'?(v.historicalWarning.includes('subtotal')?'File này có dòng tổng Excel bị nhập nhầm thành PO. Hãy nhập lại file PO gốc và xuất phiên bản mới trước khi sử dụng.':'File nhập ngoài không có snapshot lịch sử hình/version.'):v.historicalWarning}</small>}</div><a className="button" href={fileUrl(v.fileId)+'&download=1'} download={v.name} onClick={()=>{void logDownload(v.name);}}><Download size={15}/>{t('Download')}</a>{admin&&<>{v.id!==month.latestVersion&&<button disabled={locked} onClick={()=>editMonth({latestVersion:v.id,latest:v.orders,},'Latest version changed')}>{t('Set as latest')}</button>}<button className="danger" disabled={locked} onClick={()=>ask(t('Delete'),()=>{const vs=month.versions.filter((a:any)=>a.id!==v.id),last=v.id===month.latestVersion?vs.at(-1):vs.find((a:any)=>a.id===month.latestVersion);return editMonth({versions:vs,latestVersion:last?.id||'',latest:last?.orders||[],...(vs.length===0&&month.controlCleared?clearControl({...month,versions:[]}):{}),status:vs.length<2&&month.status==='Reroute'?'Active':month.status},'Deleted file version');})}><Trash2 size={15}/></button></>}</div>)}{!month.versions.length&&<div className="empty">No generated files yet. Select POs in PO Control and Generate Excel File.</div>}</div>{admin&&<div className="panel-body"><label className="upload-zone">{t('Upload new .xlsx version')}<input type="file" accept=".xlsx" disabled={locked} onChange={e=>e.target.files?.[0]&&act(async()=>{const f=e.target.files![0];const {readExportVersion}=await import('@/lib/read-export');const v=await readExportVersion(f,company,ws,month);const blob=await upload(f);v.fileId=blob.id;v.name=f.name;v.created=new Date().toISOString();v.actor=user.email;await editMonth({versions:[...month.versions,v],latestVersion:v.id,latest:v.orders},'Uploaded Excel version');})()}/></label></div>}</section></TabsContent><TabsContent value="control"><section className="panel"><div className="panel-body"><div className="row wrap"><Picker value={month.id} onChange={switchMonth} options={monthOptions}/>{admin&&<><label className="button primary"><Upload size={16}/>{t('Import')} {company}<input type="file" accept=".xlsx" disabled={locked} onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void importFile(file);}}/></label><button className="danger" disabled={!selected.length||locked} onClick={()=>ask(t('Delete selected'),()=>editMonth({orders:month.orders.filter((o:any)=>!selectedIds.has(o.id))},'Deleted selected pending POs'))}>{t('Delete selected')}</button><button className="danger" disabled={locked} onClick={()=>ask(t('Clear Data'),()=>editMonth(clearControl(month),'Cleared pending PO data'))}>{t('Clear Data')}</button><button className="exgo-settings-button" disabled={locked} onClick={()=>setDialog({type:'exgo-calendar',year:monthCalendar.year||2026,month:monthCalendar.month||9,overrides:{...monthCalendar.overrides},targetMonths:[month.id]})}>{language==='VI'?'Chỉnh năm EXGO':'EXGO year settings'}</button><button className="orange" disabled={!chosen.length||locked} onClick={act(()=>generate())}>{t('Generate Excel File')}</button></>}<button className="export-usage" disabled={!chosen.length||locked} onClick={act(()=>generate(true))}><Download size={16}/>{t('Export Production Material Usage')}</button></div></div>{Changes()}{POtable()}</section></TabsContent></Tabs>}</>}
 {page==='PO month notices'&&admin&&<PoMonthNotices key={company} workspace={ws} language={language} company={company} onSave={savePoMonthNotices}/>}
 {admin&&<div hidden={page!=='Balance review'}><BalanceReview key={company+'|'+user.email} ws={ws} company={company} language={language} revision={revision} userEmail={user.email} onSaveRule={async(rule:any,columns:any)=>save({...ws,balanceReviewRule:rule,balanceReviewColumns:columns},'Updated balance review settings')}/></div>}

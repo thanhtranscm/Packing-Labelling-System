@@ -10,6 +10,19 @@ import {validateWorkspaceShape,validateWorkspaceCompany} from '@/lib/workspace-v
 import {makeWorkspace} from '@/lib/bootstrap';
 import {validateStandardAdditions} from '@/lib/master-validation';
 
+let isolateBornAt=Date.now();
+let lastHeavyAt=0;
+let heavyWriteCount=0;
+
+function markHeavy(bytes:number){
+ if(bytes>=2*1048576){
+  const now=Date.now();
+  if(now-lastHeavyAt>25000)heavyWriteCount=0;
+  lastHeavyAt=now;
+  heavyWriteCount++;
+ }
+}
+
 function validateItemsPayload(beforeItems:any[],rawItems:any[]){
  validateStandardAdditions(beforeItems,rawItems);
  validateImageMonthChanges(beforeItems,rawItems);
@@ -46,7 +59,14 @@ export async function GET(req:Request){
  try{
   const url=new URL(req.url);
   if(url.searchParams.get('ping')==='1'){
-   return Response.json({ok:true,ts:Date.now()},{headers:{'Cache-Control':'no-store','X-Worker-Ms':String(Date.now()-t0)}});
+   const now=Date.now();
+   const sinceHeavyMs=lastHeavyAt>0?now-lastHeavyAt:999999;
+   const requiredRestMs=heavyWriteCount>=3?15000:heavyWriteCount===2?11000:heavyWriteCount===1?7000:0;
+   const cooling=sinceHeavyMs<requiredRestMs;
+   return Response.json(
+    {ok:true,ts:now,cooling,sinceHeavyMs,heavyWriteCount,isolateAgeMs:now-isolateBornAt},
+    {headers:{'Cache-Control':'no-store','X-Worker-Ms':String(now-t0)}}
+   );
   }
   const user=await readStage('account/database',()=>identity());
   const company=url.searchParams.get('company');
@@ -80,7 +100,7 @@ export async function PUT(req:Request){
   if(!Number.isSafeInteger(revision)||revision<0)throw Error('Invalid revision');
   const old:any=await db().prepare('SELECT data FROM workspaces WHERE company = ? AND revision = ?').bind(company,revision).first();
   if(!old)return Response.json({error:'Workspace changed in another session. Reload before saving.'},{status:409});
-  const before=await workspaceData(old);
+  let before:any=await workspaceData(old);
   old.data=null;
   const monthsOrProfilesChanged=!sameValue(before.months,data.months)||!sameValue(before.profiles,data.profiles);
   if(monthsOrProfilesChanged)reconcileSummaryRows(data);
@@ -106,8 +126,10 @@ export async function PUT(req:Request){
    const itemDetail=diffChangedItems(before.items,data.items);
    if(itemDetail?.changes?.length)detail.changes=[...(detail.changes||[]),...itemDetail.changes];
   }
+  before=null;
   const storageKey=company+'/workspace/'+crypto.randomUUID();
   const serializedData=JSON.stringify(data);
+  markHeavy(serializedData.length);
   await bucket().put(storageKey,serializedData,{httpMetadata:{contentType:'application/json'}});
   const committed=await commitWorkspace(db(),company,revision,storageKey,user.email,action||'Updated workspace',detail);
   if(!committed)return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
@@ -130,7 +152,7 @@ export async function PATCH(req:Request){
  record.data=null;
  if(operation==='po-month-notices'){
   const result=applyPoMonthNotices(data,input.changes);if(!result.changes.length)return timedJson({revision,notes:result.notes},t0);
-  data.poMonthNotices=result.notes;const serialized=JSON.stringify(data);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
+  data.poMonthNotices=result.notes;const serialized=JSON.stringify(data);markHeavy(serialized.length);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
   if(!await commitWorkspace(database,company,revision,key,user.email,'Updated PO month notices',{changes:result.changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return timedJson({revision:revision+1,notes:result.notes},t0,serialized.length);
  }
@@ -172,7 +194,7 @@ export async function PATCH(req:Request){
   }
   const basisPayload=[...new Set([...ids,...updatedIds])].map(id=>{const m=items.get(id);const perSku=!!m?.perSkuImage||m?.imageMode==='sku';return {id,quantityBasis:m?.quantityBasis,perSkuImage:perSku,imageMode:perSku?'sku':'single'};});
   if(!changes.length)return timedJson({revision,basis:basisPayload},t0);
-  const serialized=JSON.stringify(data);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
+  const serialized=JSON.stringify(data);markHeavy(serialized.length);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
   if(!await commitWorkspace(database,company,revision,key,user.email,'Updated calculation basis & SKU image settings',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return timedJson({revision:revision+1,basis:basisPayload},t0,serialized.length);
  }
@@ -180,11 +202,18 @@ export async function PATCH(req:Request){
   if(!Array.isArray(input.items))throw Error('Invalid items');
   const beforeItems=data.items;
   const nextItems=validateItemsPayload(beforeItems,input.items);
+  input.items=null;
   data.items=nextItems;
   const detail=diffChangedItems(beforeItems,nextItems);
-  const serialized=JSON.stringify(data);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
+  const itemsJson=JSON.stringify(nextItems);
+  const serialized=JSON.stringify(data);
+  data.items=null;
+  data.months=null;
+  markHeavy(serialized.length);
+  const key=company+'/workspace/'+crypto.randomUUID();
+  await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
   if(!await commitWorkspace(database,company,revision,key,user.email,input.action||'Country saved',detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
-  return timedJson({revision:revision+1,items:data.items},t0,serialized.length);
+  return new Response(`{"revision":${revision+1},"items":${itemsJson}}`,{headers:{'Content-Type':'application/json','X-Worker-Ms':String(Date.now()-t0),'X-Workspace-Bytes':String(serialized.length)}});
  }
  if(operation==='reuse'){
   if(!Array.isArray(input.changes)||!input.changes.length)throw Error('Invalid reuse update');
@@ -221,16 +250,22 @@ export async function PATCH(req:Request){
    }
   }
   if(!changes.length)return timedJson({revision,items:data.items},t0);
-  const serialized=JSON.stringify(data);const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
+  const itemsJson=JSON.stringify(data.items);
+  const serialized=JSON.stringify(data);
+  data.items=null;
+  data.months=null;
+  markHeavy(serialized.length);
+  const key=company+'/workspace/'+crypto.randomUUID();
+  await storage.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
   if(!await commitWorkspace(database,company,revision,key,user.email,'Image reuse updated',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
-  return timedJson({revision:revision+1,items:data.items},t0,serialized.length);
+  return new Response(`{"revision":${revision+1},"items":${itemsJson}}`,{headers:{'Content-Type':'application/json','X-Worker-Ms':String(Date.now()-t0),'X-Workspace-Bytes':String(serialized.length)}});
  }
  const index=data.months.findIndex((m:any)=>m.id===monthId);if(index<0)throw Error('Month unavailable');
- const previous=data.months[index];let detail:any,action:string,result:any;
+ const previous=data.months[index];let detail:any,action:string,resultJson='';
  if(operation==='visibility'){
   if(typeof input.show!=='boolean')throw Error('Invalid visibility');
   if(previous.show===input.show)return timedJson({revision,show:input.show},t0);
-  data.months[index]={...previous,show:input.show};action='Month visibility changed';detail={changes:[{path:'months / '+previous.name+'.show',before:previous.show,after:input.show}]};result={show:input.show};
+  data.months[index]={...previous,show:input.show};action='Month visibility changed';detail={changes:[{path:'months / '+previous.name+'.show',before:previous.show,after:input.show}]};resultJson=`"show":${JSON.stringify(input.show)}`;
  }else if(operation==='month-update'){
   if(!input.changes||typeof input.changes!=='object')throw Error('Invalid month update');
   let updated={...previous,...input.changes};
@@ -241,7 +276,7 @@ export async function PATCH(req:Request){
   data.months[index]=updated;
   action=input.action||'Updated month';
   detail=auditChanges({months:[previous]},{months:[updated]});
-  result={month:updated};
+  resultJson=`"month":${JSON.stringify(updated)}`;
  }else{
   if(!Array.isArray(input.orders)||!input.orders.length||typeof input.file?.name!=='string'||typeof input.file?.id!=='string'||!input.file.id.startsWith(company+'/'))throw Error('Invalid PO import');
   if(!await storage.head(input.file.id))throw Error('Original import file unavailable');
@@ -254,9 +289,14 @@ export async function PATCH(req:Request){
   month.imports=[...(previous.imports||[]),{...importRecord,orders:month.orders}];data.months[index]=month;
   action=`Imported ${month.orders.length} POs from ${input.file.name}`;
   detail=auditChanges({orders:previous.orders},{orders:month.orders});detail.changes.push({path:'months / '+previous.name+'.imports',before:{count:(previous.imports||[]).length},after:{...importRecord,count:month.imports.length,POs:month.orders.map((o:any)=>o.factoryPo||o.onPo),pairs:month.orders.reduce((n:number,o:any)=>n+o.total,0)}});
-  result={orders:month.orders,settings:month.settings,importRevision:month.importRevision,importRecord};
+  resultJson=`"orders":${JSON.stringify(month.orders)},"settings":${JSON.stringify(month.settings)},"importRevision":${month.importRevision},"importRecord":${JSON.stringify(importRecord)}`;
  }
- const serialized=JSON.stringify(data);const storageKey=company+'/workspace/'+crypto.randomUUID();await storage.put(storageKey,serialized,{httpMetadata:{contentType:'application/json'}});
+ const serialized=JSON.stringify(data);
+ data.items=null;
+ data.months=null;
+ markHeavy(serialized.length);
+ const storageKey=company+'/workspace/'+crypto.randomUUID();
+ await storage.put(storageKey,serialized,{httpMetadata:{contentType:'application/json'}});
  if(!await commitWorkspace(database,company,revision,storageKey,user.email,action,detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
- return timedJson({revision:revision+1,...result},t0,serialized.length);
+ return new Response(`{"revision":${revision+1},${resultJson}}`,{headers:{'Content-Type':'application/json','X-Worker-Ms':String(Date.now()-t0),'X-Workspace-Bytes':String(serialized.length)}});
 }catch(e){return fail(e);}}
