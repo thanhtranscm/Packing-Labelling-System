@@ -67,37 +67,49 @@ const loadSequence=useRef(0),actionLock=useRef(false),saveRunning=useRef(false),
 revisionRef.current=revision;
 serverStopRef.current=serverStop;
 
+const isServerStopped=!!serverStop;
 useEffect(()=>{
- if(!serverStop){setStopSeconds(0);return;}
+ if(!isServerStopped){setStopSeconds(0);return;}
  let cancelled=false;
+ let inFlight=false;
  const tick=async()=>{
   if(cancelled)return;
-  const left=Math.max(0,Math.ceil((serverStop.checkAt-Date.now())/1000));
+  const cur=serverStopRef.current;
+  if(!cur)return;
+  const left=Math.max(0,Math.ceil((cur.checkAt-Date.now())/1000));
   setStopSeconds(left);
-  if(left>0||serverStop.probing)return;
-  setServerStop(cur=>cur?{...cur,probing:true}:null);
+  if(left>0||inFlight)return;
+  inFlight=true;
+  setServerStop(prev=>prev?{...prev,probing:true}:null);
   const pingStart=Date.now();
+  const ctrl=new AbortController();
+  const timeout=setTimeout(()=>ctrl.abort(),5000);
   try{
-   const r=await fetch('/api/workspace?company='+encodeURIComponent(company)+'&ping=1',{cache:'no-store'});
-   const pingMs=Number(r.headers.get('X-Worker-Ms')||0)||(Date.now()-pingStart);
+   const r=await fetch('/api/workspace?company='+encodeURIComponent(company)+'&ping=1',{cache:'no-store',signal:ctrl.signal});
+   const workerMs=Number(r.headers.get('X-Worker-Ms')||0);
+   const roundTripMs=Date.now()-pingStart;
    const text=await r.text();
    let ok=false;
-   try{const j=JSON.parse(text);ok=r.ok&&!!j;}catch{}
+   try{const j=JSON.parse(text);ok=r.ok&&!!j?.ok;}catch{}
    if(cancelled)return;
-   if(ok&&pingMs<900){
+   const healthy=ok&&(workerMs>0?workerMs<800:roundTripMs<2500);
+   if(healthy){
     saveTimestamps.current=[];
     setServerStop(null);
    }else{
-    setServerStop(cur=>cur?{...cur,ms:pingMs,checkAt:Date.now()+3500,probing:false}:null);
+    setServerStop(prev=>prev?{...prev,ms:workerMs||roundTripMs,checkAt:Date.now()+3000,probing:false}:null);
    }
   }catch{
-   if(!cancelled)setServerStop(cur=>cur?{...cur,checkAt:Date.now()+3500,probing:false}:null);
+   if(!cancelled)setServerStop(prev=>prev?{...prev,checkAt:Date.now()+3000,probing:false}:null);
+  }finally{
+   clearTimeout(timeout);
+   inFlight=false;
   }
  };
  void tick();
  const timer=setInterval(()=>{void tick();},300);
  return()=>{cancelled=true;clearInterval(timer);};
-},[serverStop,company]);
+},[isServerStopped,company]);
 
 useEffect(()=>{
  if(ws||!error||!/1102|CPU\/RAM/i.test(error)){setBootRetryLeft(0);return;}
