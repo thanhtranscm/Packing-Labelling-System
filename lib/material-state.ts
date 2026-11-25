@@ -7,42 +7,86 @@ export const reuseState=(image:any,rules:any[]):string=>{
 };
 const versionText=(v:any)=>String(v||'').trim().toUpperCase().replace(/×/g,'*').replace(/\s+/g,' ');
 const sameMaterialVersion=(a:any,b:any)=>versionText(a.item_code)===versionText(b.item_code)&&versionText(a.description)===versionText(b.description);
-export function standardImageVersion(items:any[],version:any){
+
+function buildStandardVersionIndex(items:any[]){
+  const index=new Map<string,any[]>();
+  for(const m of items){
+    if(m.destination!=='STANDARD')continue;
+    for(const v of m.versions||[]){
+      const code=String(v.item_code||'').trim().toUpperCase();
+      if(!code)continue;
+      const list=index.get(code)||[];
+      list.push(v);
+      index.set(code,list);
+    }
+  }
+  return index;
+}
+
+export function standardImageVersion(items:any[],version:any,stdIndex?:Map<string,any[]>,ownerItem?:any){
   const code=String(version.item_code||'').trim().toUpperCase();
   if(!code)return undefined;
-  const sources=items.filter(m=>m.destination==='STANDARD').flatMap(m=>m.versions||[]).filter(v=>String(v.item_code||'').trim().toUpperCase()===code);
-  // Prefer the explicitly linked Standard version if a code appears in multiple rows.
-  const owner=version.id&&items.find(m=>(m.versions||[]).some((v:any)=>v.id===version.id));
+  const sources=stdIndex?stdIndex.get(code)||[]:items.filter(m=>m.destination==='STANDARD').flatMap(m=>m.versions||[]).filter(v=>String(v.item_code||'').trim().toUpperCase()===code);
+  if(!sources.length)return undefined;
+  const owner=ownerItem||(version.id&&items.find(m=>(m.versions||[]).some((v:any)=>v.id===version.id)));
   const duplicateCode=owner&&(owner.versions||[]).filter((v:any)=>versionText(v.item_code)===versionText(version.item_code)).length>1;
   return sources.find(v=>v.id===version.standardVersionId)||sources.find(v=>v.id===version.id)||sources.find(v=>sameMaterialVersion(v,version))||(sources.length===1&&!duplicateCode?sources[0]:undefined);
 }
-export function syncStandardImages(items:any[]){
-  const next=structuredClone(items);
-  for(const m of next)if(m.destination!=='STANDARD')for(const v of m.versions||[]){
-    const source=standardImageVersion(next,v);if(!source)continue;
-    v.images=structuredClone(source.images||[]).map((im:any)=>{
-      const months=m.versions.length>1?(im.months||[]).filter((id:string)=>(v.months||[]).includes(id)):im.months||[];
-      return {...im,months,poIds:months.length?(im.poIds||[]):[]};
-    });
+
+function applyStandardImagesInPlace(next:any[]){
+  const stdIndex=buildStandardVersionIndex(next);
+  if(!stdIndex.size)return next;
+  for(const m of next){
+    if(m.destination==='STANDARD')continue;
+    for(const v of m.versions||[]){
+      const source=standardImageVersion(next,v,stdIndex,m);
+      if(!source)continue;
+      v.images=(source.images||[]).map((im:any)=>{
+        const months=m.versions.length>1?(im.months||[]).filter((id:string)=>(v.months||[]).includes(id)):[...(im.months||[])];
+        return {...im,months,poIds:months.length?[...(im.poIds||[])]:[],conditions:Array.isArray(im.conditions)?[...im.conditions]:[]};
+      });
+    }
   }
   return next;
 }
+
+export function syncStandardImages(items:any[]){
+  const next=items.map(m=>m.destination==='STANDARD'?m:{...m,versions:(m.versions||[]).map((v:any)=>({...v}))});
+  return applyStandardImagesInPlace(next);
+}
+
 export function syncStandard(previous:any[],draft:any[]){
-  const next=structuredClone(draft),std=next.filter((m:any)=>m.destination==='STANDARD'&&m.item_code),oldStd=previous.filter(m=>m.destination==='STANDARD');
-  const names=[...new Set(next.filter((m:any)=>m.destination!=='STANDARD').map((m:any)=>m.destination))];
+  const std=draft.filter((m:any)=>m.destination==='STANDARD'&&m.item_code);
+  const stdByNo=new Map<number,any>(std.map((m:any)=>[m.list_no,m]));
+  const oldStd=previous.filter(m=>m.destination==='STANDARD');
+  const oldStdKeySet=new Set(oldStd.filter(old=>old.item_code).map(old=>old.list_no));
+  const names=[...new Set(draft.filter((m:any)=>m.destination!=='STANDARD').map((m:any)=>m.destination))];
+
+  const clonedById=new Map<string,any>();
+  const countryByNo=new Map<string,any>();
+  for(const m of draft){
+    if(m.destination==='STANDARD')continue;
+    const copy={...m,versions:(m.versions||[]).map((v:any)=>({...v,months:[...(v.months||[])],images:(v.images||[]).map((im:any)=>({...im,months:[...(im.months||[])],poIds:[...(im.poIds||[])],conditions:[...(im.conditions||[])]}))}))};
+    clonedById.set(m.id,copy);
+    countryByNo.set(m.destination+'|'+m.list_no,copy);
+  }
+  const deletedIds=new Set<string>();
+  const addedItems:any[]=[];
+
   for(const country of names){
     for(const before of oldStd){
-      const after=std.find((m:any)=>m.list_no===before.list_no);
-      const m=next.find((m:any)=>m.destination===country&&m.list_no===before.list_no);if(!m)continue;
+      const after=stdByNo.get(before.list_no);
+      const key=country+'|'+before.list_no;
+      const m=countryByNo.get(key);
+      if(!m)continue;
       const inherited=m.standardId===before.id||m.item_code===before.item_code;
       if(inherited){
-        if(!after){next.splice(next.indexOf(m),1);continue;}
+        if(!after){deletedIds.add(m.id);countryByNo.delete(key);continue;}
         const privateVersions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
         const linked=after.versions.map((v:any)=>({...structuredClone(v),id:(m.versions.find((old:any)=>old.standardVersionId===v.id)||m.versions.find((old:any)=>!old.standardVersionId&&sameMaterialVersion(old,v)))?.id||crypto.randomUUID(),standardVersionId:v.id}));
         const perSku=!!after.perSkuImage||after.imageMode==='sku';
         Object.assign(m,{standardId:after.id,description:after.description,item_code:after.item_code,qty_per_finish:after.qty_per_finish,unit:after.unit,output_type:after.output_type,outputs:outputs(after),perSkuImage:perSku,imageMode:perSku?'sku':'single',versions:[...linked,...privateVersions]});
       }else{
-        // A country can keep its own replacement and still subscribe to Standard versions.
         const follows=m.versions.some((v:any)=>v.standardVersionId||before.versions.some((s:any)=>sameMaterialVersion(s,v)));
         if(follows&&after){
           const privateVersions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
@@ -56,13 +100,18 @@ export function syncStandard(previous:any[],draft:any[]){
         }else if(follows&&!after)m.versions=m.versions.filter((v:any)=>!v.standardVersionId&&!before.versions.some((s:any)=>sameMaterialVersion(s,v)));
       }
     }
-    for(const s of std.filter((m:any)=>!oldStd.some(old=>old.list_no===m.list_no&&old.item_code))){
-      const existing=next.find((m:any)=>m.destination===country&&m.list_no===s.list_no);if(existing)continue;
+    for(const s of std){
+      if(oldStdKeySet.has(s.list_no))continue;
+      const key=country+'|'+s.list_no;
+      if(countryByNo.has(key))continue;
       const perSku=!!s.perSkuImage||s.imageMode==='sku';
-      next.push({...structuredClone(s),id:crypto.randomUUID(),destination:country,standardId:s.id,perSkuImage:perSku,imageMode:perSku?'sku':'single',versions:s.versions.map((v:any)=>({...structuredClone(v),id:crypto.randomUUID(),standardVersionId:v.id}))});
+      const created={...structuredClone(s),id:crypto.randomUUID(),destination:country,standardId:s.id,perSkuImage:perSku,imageMode:perSku?'sku':'single',versions:s.versions.map((v:any)=>({...structuredClone(v),id:crypto.randomUUID(),standardVersionId:v.id}))};
+      addedItems.push(created);
+      countryByNo.set(key,created);
     }
   }
-  return syncStandardImages(next);
+  const next=[...draft.filter(m=>!deletedIds.has(m.id)).map(m=>clonedById.get(m.id)||m),...addedItems];
+  return applyStandardImagesInPlace(next);
 }
 
 // Empty Standard placeholders are not replacement materials.

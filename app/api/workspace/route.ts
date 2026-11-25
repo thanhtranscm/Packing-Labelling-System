@@ -28,6 +28,15 @@ function validateItemsPayload(beforeItems:any[],rawItems:any[]){
  return nextItems;
 }
 
+function diffChangedItems(beforeItems:any[],nextItems:any[]){
+ const beforeMap=new Map<string,string>(beforeItems.map((m:any)=>[m.id,JSON.stringify(m)]));
+ const nextMap=new Map<string,string>(nextItems.map((m:any)=>[m.id,JSON.stringify(m)]));
+ return auditChanges(
+  {items:beforeItems.filter((m:any)=>beforeMap.get(m.id)!==nextMap.get(m.id))},
+  {items:nextItems.filter((m:any)=>beforeMap.get(m.id)!==nextMap.get(m.id))}
+ );
+}
+
 export async function GET(req:Request){
  try{
   const url=new URL(req.url);
@@ -76,10 +85,20 @@ export async function PUT(req:Request){
     return prepareMonthSettings(m,data);
    });
   }
+  const auditBefore:any={},auditAfter:any={};
+  for(const k of Object.keys({...before,...data})){
+   if(k==='workspaceCompany'||k==='items')continue;
+   if(!sameValue(before[k],data[k])){auditBefore[k]=before[k];auditAfter[k]=data[k];}
+  }
+  const detail=auditChanges(auditBefore,auditAfter);
+  if(itemsChanged){
+   const itemDetail=diffChangedItems(before.items,data.items);
+   if(itemDetail?.changes?.length)detail.changes=[...(detail.changes||[]),...itemDetail.changes];
+  }
   const storageKey=company+'/workspace/'+crypto.randomUUID();
   const serializedData=JSON.stringify(data);
   await bucket().put(storageKey,serializedData,{httpMetadata:{contentType:'application/json'}});
-  const committed=await commitWorkspace(db(),company,revision,storageKey,user.email,action||'Updated workspace',auditChanges(before,data));
+  const committed=await commitWorkspace(db(),company,revision,storageKey,user.email,action||'Updated workspace',detail);
   if(!committed)return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return new Response(`{"revision":${revision+1},"data":${serializedData}}`,{headers:{'Content-Type':'application/json'}});
  }catch(e){return fail(e);}
@@ -148,24 +167,48 @@ export async function PATCH(req:Request){try{
   const beforeItems=data.items;
   const nextItems=validateItemsPayload(beforeItems,input.items);
   data.items=nextItems;
-  const detail=auditChanges({items:beforeItems},{items:nextItems});
+  const detail=diffChangedItems(beforeItems,nextItems);
   const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
   if(!await commitWorkspace(database,company,revision,key,user.email,input.action||'Country saved',detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return Response.json({revision:revision+1,items:data.items});
  }
  if(operation==='reuse'){
   if(!Array.isArray(input.changes)||!input.changes.length)throw Error('Invalid reuse update');
-  const beforeItems=structuredClone(data.items);
+  const itemMap=new Map<string,any>(data.items.map((m:any)=>[m.id,m]));
+  const changes:any[]=[];
   for(const change of input.changes){
-   const image=data.items.find((a:any)=>a.id===change.itemId)?.versions?.find((v:any)=>v.id===change.versionId)?.images?.find((im:any)=>im.id===change.imageId);
+   const item=itemMap.get(change.itemId);
+   const version=item?.versions?.find((v:any)=>v.id===change.versionId);
+   const image=version?.images?.find((im:any)=>im.id===change.imageId);
    if(!image)throw Error('Image no longer exists');
-   image.conditions=Array.isArray(change.conditions)?change.conditions:[];
+   const nextConditions=Array.isArray(change.conditions)?change.conditions:[];
+   const prevConditions=Array.isArray(image.conditions)?image.conditions:[];
+   if(image.reuse!==change.reuse||JSON.stringify(prevConditions)!==JSON.stringify(nextConditions)){
+    changes.push({
+     path:`items / ${item.destination} No.${item.list_no} / ${version.item_code} / ${image.name}`,
+     before:{reuse:image.reuse,conditions:prevConditions},
+     after:{reuse:change.reuse,conditions:nextConditions}
+    });
+   }
+   image.conditions=nextConditions;
    image.reuse=change.reuse;
+   if(item.destination==='STANDARD'){
+    for(const other of data.items){
+     if(other.destination==='STANDARD')continue;
+     for(const ov of other.versions||[]){
+      for(const oim of ov.images||[]){
+       if(oim.id===image.id){
+        oim.conditions=[...nextConditions];
+        oim.reuse=change.reuse;
+       }
+      }
+     }
+    }
+   }
   }
-  data.items=syncStandard(beforeItems,data.items);
-  const detail=auditChanges({items:beforeItems},{items:data.items});
+  if(!changes.length)return Response.json({revision,items:data.items});
   const key=company+'/workspace/'+crypto.randomUUID();await storage.put(key,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}});
-  if(!await commitWorkspace(database,company,revision,key,user.email,'Image reuse updated',detail))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
+  if(!await commitWorkspace(database,company,revision,key,user.email,'Image reuse updated',{changes}))return Response.json({error:'Concurrent edit: reload and retry.'},{status:409});
   return Response.json({revision:revision+1,items:data.items});
  }
  const index=data.months.findIndex((m:any)=>m.id===monthId);if(index<0)throw Error('Month unavailable');
