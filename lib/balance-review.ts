@@ -28,6 +28,7 @@ export function reviewBalance(months:any[],orders:any[],company:string,calendar:
 function assignNewOrders(result:any,months:any[],calendar:any){
  const reports=(result.reports||[]).map((r:any)=>({...r,rows:[...(r.rows||[])]})),unassigned:any[]=[];
  const valid=/^(?:([A-Z0-9][A-Z0-9 .\/'-]{0,39}?)\s+)?(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:T(?:EMBER)?)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)(?:\s+20\d{2})?$/i;
+ const isoDate=/^(20\d{2})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?$/;
  // Match explicit prefixes first. A plain site month represents END only
  // when no MID exists in that month and no other site month competes.
  const source=[...(result.unassigned||[]),...(result.ambiguous||[]),...reports.flatMap((r:any)=>r.rows.map((row:any)=>row.fresh).filter(Boolean))];
@@ -36,7 +37,7 @@ function assignNewOrders(result:any,months:any[],calendar:any){
  const anchors=new Map<any,Set<number>>();
  for(const report of reports)for(const row of report.rows||[]){
   if(!row.fresh||!Number.isInteger(report.month?.year))continue;
-  const text=String(row.fresh.exgo||'').trim();if(!valid.test(text))continue;
+  const text=String(row.fresh.exgo||'').trim();if(!valid.test(text)&&!isoDate.test(text))continue;
   const period=exgoPeriod(text,calendar);
   if(period.month!==Number(report.month.month))continue;
   const ys=anchors.get(row.fresh)||new Set<number>();ys.add(report.month.year);anchors.set(row.fresh,ys);
@@ -57,7 +58,23 @@ function assignNewOrders(result:any,months:any[],calendar:any){
  const groupKey=(o:any,p:any)=>{const src=o.source;if(!src||typeof src.fileName!=='string'||typeof src.sheet!=='string'||!Number.isSafeInteger(src.row)||src.row<1)return '';return JSON.stringify([src.fileName,src.sheet,p.year,p.month]);};
  for(const o of source){const m=valid.exec(String(o.exgo||'').trim());if(!m)continue;const p=periodFor(o),k=groupKey(o,p),prefix=String(m[1]||'').trim().toUpperCase();if(!k||!['MID','END','LATE'].includes(prefix))continue;const g=sourceGroups.get(k)||{mid:[],end:[]};(prefix==='MID'?g.mid:g.end).push(o.source.row);sourceGroups.set(k,g);}
  for(const order of result.unassigned||[]){
-  const text=String(order.exgo||'').trim(),match=valid.exec(text);if(!match){unassigned.push({...order,reviewReason:text?'unrecognized_exgo':'missing_exgo'});continue;}
+  if(key(order.deliveryForm)==='UPPER'){unassigned.push({...order,exgo:'_',reviewReason:'unrecognized_exgo'});continue;}
+  const text=String(order.exgo||'').trim();
+  const isoMatch=isoDate.exec(text);
+  if(isoMatch){
+   const year=+isoMatch[1],month=+isoMatch[2],day=isoMatch[3]?+isoMatch[3]:0;
+   const sameMonth=months.filter(m=>+m.year===year&&+m.month===month);
+   let matches=sameMonth;
+   if(sameMonth.length>1&&day>0){
+    const target=day<=15?'MID':'END';
+    matches=sameMonth.filter(m=>{const prefix=String(m.prefix||'').trim().toUpperCase();return target==='MID'?prefix==='MID':['END','LATE'].includes(prefix);});
+   }
+   const report=matches.length===1?reports.find((r:any)=>r.month.id===matches[0].id):undefined;
+   if(!report){unassigned.push({...order,reviewReason:!sameMonth.length?'no_month':matches.length>1?'multiple_months':'period_mismatch'});continue;}
+   report.rows.push({old:order,fresh:order,origin:'balance',status:'new',changes:[]});
+   continue;
+  }
+  const match=valid.exec(text);if(!match){unassigned.push({...order,reviewReason:text?'unrecognized_exgo':'missing_exgo'});continue;}
   const p=periodFor(order),sameMonth=months.filter(m=>+m.year===p.year&&+m.month===p.month),sourcePrefix=String(match[1]||'').trim().toUpperCase();
   const possibleYears=new Set<number>(months.filter(m=>+m.month===p.month&&Number.isInteger(m.year)).map(m=>m.year));
   if(!/\b20\d{2}\b/.test(text)&&(uncertainYears.has(order)||(!inferred.has(order)&&!order.reviewExgoYear&&possibleYears.size>1))){unassigned.push({...order,reviewReason:'ambiguous_year'});continue;}
